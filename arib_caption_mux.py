@@ -2527,13 +2527,17 @@ class TrackAction(argparse.Action):
     """--audio / --audio-wav / --audio-aac пишут в один упорядоченный список."""
 
     def __call__(self, parser, ns, value, option):
-        kind = {'--audio-wav': 'wav', '--audio-aac': 'aac', '--audio-mp2': 'mp2'}.get(option)
+        kind = {'--audio-wav': 'wav', '--audio-aac': 'aac', '--audio-mp2': 'mp2',
+                '--audio-pcm': 'pcm', '--audio-ac3': 'ac3'}.get(option)
         if kind is None:
             low = value.lower()
             kind = ('aac' if low.endswith(('.aac', '.adts')) else
+                    'ac3file' if low.endswith(('.ac3', '.eac3')) else
                     'mp2file' if low.endswith(('.mp2', '.mpa', '.m2a')) else 'wav')
         elif kind == 'mp2' and value.lower().endswith(('.mp2', '.mpa', '.m2a')):
             kind = 'mp2file'
+        elif kind == 'ac3' and value.lower().endswith(('.ac3', '.eac3')):
+            kind = 'ac3file'
         lst = list(getattr(ns, self.dest, None) or [])
         lst.append((kind, value))
         setattr(ns, self.dest, lst)
@@ -2547,10 +2551,11 @@ AUDIO_NAMES, AUDIO_CS = {}, None      # component_tag -> название дор
 # и 2048 — самое частое значение (fdkaac, Apple, Nero), у ffmpeg 1024.
 AAC_ENCODER_DELAY = {'fdkaac': 2048, 'ffmpeg': 1024, 'file': 2048}
 MP2_ENCODER_DELAY = {'libtwolame': 482, 'mp2': 482, 'file': 482}
+AC3_ENCODER_DELAY = {'ffmpeg': 256, 'file': 256}                  # измерено на щелчке
 
 
 def is_audio_es(es):
-    if es['type'] in AUDIO_TYPES or es['type'] in (0x87,):
+    if es['type'] in AUDIO_TYPES or es['type'] in (0x82, 0x83, 0x87):
         return True
     if es['type'] == 0x06:
         for d in es['descs']:
@@ -2676,6 +2681,81 @@ def encode_wav_to_mp2(path, encoder, bitrate, channels, warn):
     return data, codec
 
 
+AC3_BITRATES = [32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 576, 640]
+AC3_RATES = {0: 48000, 1: 44100, 2: 32000}
+AC3_ACMOD_CH = [2, 1, 2, 3, 3, 4, 4, 5]   # 1+1, 1/0, 2/0, 3/0, 2/1, 3/1, 2/2, 3/2
+
+
+def ac3_frames(data):
+    """Кадры AC-3 (ATSC A/52) -> [(смещение, длина)] и параметры потока."""
+    frames, i, info = [], 0, None
+    while i + 8 <= len(data):
+        if data[i] != 0x0B or data[i + 1] != 0x77:
+            j = data.find(b'\x0b\x77', i + 1)
+            if j < 0:
+                break
+            i = j
+            continue
+        fscod, frmsizecod = data[i + 4] >> 6, data[i + 4] & 0x3F
+        if fscod == 3 or frmsizecod >= 38:
+            i += 2
+            continue
+        rate = AC3_RATES[fscod]
+        kbps = AC3_BITRATES[frmsizecod >> 1]
+        words = {0: kbps * 2, 1: (kbps * 1536 // 44100 + (frmsizecod & 1)) or 1, 2: kbps * 3}[fscod]
+        if fscod == 1:                       # 44,1 кГц: размер зависит от бита чётности
+            words = (1536 * kbps * 1000 // 44100 // 16 + (frmsizecod & 1))
+        length = words * 2
+        if length < 8 or i + length > len(data):
+            break
+        if info is None:
+            bsid, bsmod = data[i + 5] >> 3, data[i + 5] & 7
+            acmod = data[i + 6] >> 5
+            bit = 6 * 8 + 3
+            if (acmod & 1) and acmod != 1:
+                bit += 2                     # cmixlev
+            if acmod & 4:
+                bit += 2                     # surmixlev
+            if acmod == 2:
+                bit += 2                     # dsurmod
+            lfeon = (data[bit // 8] >> (7 - bit % 8)) & 1
+            info = {'rate': rate, 'kbps': kbps, 'acmod': acmod, 'lfe': lfeon, 'bsid': bsid,
+                    'bsmod': bsmod, 'ch': AC3_ACMOD_CH[acmod] + lfeon, 'crc': True,
+                    'mpeg1': True, 'mpeg2': True, 'spf': 1536}
+        frames.append((i, length))
+        i += length
+    return frames, info
+
+
+def encode_wav_to_ac3(path, bitrate, channels, warn):
+    """WAV -> Dolby Digital 48 кГц (ATSC A/52), как на лентах D-Theater."""
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        raise SystemExit('для AC-3 нужен ffmpeg')
+    ch = channels or (wav_channels(path) or 2)
+    if ch not in (1, 2, 6):
+        warn('%s: %d каналов сведены в стерео' % (path, ch))
+        ch = 2
+    if bitrate > 640:
+        warn('%s: D-VHS допускает для AC-3 не больше 640 кбит/с' % path)
+        bitrate = 640
+    tmp = tempfile.NamedTemporaryFile(suffix='.ac3', delete=False)
+    tmp.close()
+    try:
+        subprocess.run([ffmpeg, '-v', 'error', '-y', '-i', path, '-vn', '-ar', '48000', '-ac', str(ch),
+                        '-c:a', 'ac3', '-b:a', '%dk' % bitrate, '-f', 'ac3', tmp.name], check=True)
+        data = bytearray(open(tmp.name, 'rb').read())
+    except subprocess.CalledProcessError as e:
+        raise SystemExit('кодирование AC-3 не удалось: %s' % e)
+    finally:
+        os.unlink(tmp.name)
+    return data, 'ffmpeg'
+
+
 def wav_channels(path):
     import wave
     try:
@@ -2777,11 +2857,127 @@ class CaptionTrack:
         self.events = ev
 
 
+BIT_REVERSE = [int('{:08b}'.format(i)[::-1], 2) for i in range(256)]
+PCM_SAMPLES_PER_PES = 1600        # 33,3 мс — как кадр видео, так делает дека
+
+
+def pack_smpte302(samples, status_first=True):
+    """16-битные стереопары -> SMPTE 302M: 5 байт на пару, по 20 бит на канал.
+
+    Два порядка внутри 20-битного поля:
+      status_first=True  — 4 служебных бита, затем 16 бит звука младшим вперёд.
+                           Так пишет D-VHS (проверено на записи с деки: корреляция
+                           с дорожкой MP2 того же файла 0,98).
+      status_first=False — как кодирует ffmpeg: сначала звук, потом служебные.
+    """
+    out = bytearray()
+    for l, r in samples:
+        a = (BIT_REVERSE[l & 0xFF] << 8) | BIT_REVERSE[(l >> 8) & 0xFF]
+        b = (BIT_REVERSE[r & 0xFF] << 8) | BIT_REVERSE[(r >> 8) & 0xFF]
+        if not status_first:
+            a <<= 4
+            b <<= 4
+        out += (((a & 0xFFFFF) << 20) | (b & 0xFFFFF)).to_bytes(5, 'big')
+    return bytes(out)
+
+
+def unpack_smpte302(data, status_first=True):
+    out = []
+    for i in range(0, len(data) // 5 * 5, 5):
+        v = int.from_bytes(data[i:i + 5], 'big')
+        pair = []
+        for f in ((v >> 20) & 0xFFFFF, v & 0xFFFFF):
+            if not status_first:
+                f >>= 4
+            x = BIT_REVERSE[(f >> 8) & 0xFF] | (BIT_REVERSE[f & 0xFF] << 8)
+            pair.append(x - 65536 if x >= 32768 else x)
+        out.append(tuple(pair))
+    return out
+
+
+def read_pcm_48k(path, ffmpeg, warn):
+    """Любой файл -> список стереопар 16 бит 48 кГц (через ffmpeg)."""
+    import struct
+    import subprocess
+    try:
+        res = subprocess.run([ffmpeg, '-v', 'error', '-i', path, '-vn', '-ar', '48000',
+                              '-ac', '2', '-f', 's16le', '-'], capture_output=True)
+    except OSError:
+        raise SystemExit('для PCM нужен ffmpeg (или укажите --ffmpeg)')
+    if res.returncode != 0 or not res.stdout:
+        raise SystemExit('не удалось прочитать %r:\n%s' % (path, res.stderr.decode(errors='replace')))
+    raw = res.stdout
+    n = len(raw) // 4
+    v = struct.unpack('<%dh' % (n * 2), raw[:n * 4])
+    return list(zip(v[0::2], v[1::2]))
+
+
+class PcmTrack:
+    """Линейный PCM по SMPTE 302M — тот самый звук, которым дека пишет в STD
+    и который встречается на лентах D-Theater. stream_type 0x83, PES 0xBD."""
+
+    codec = 'pcm'
+    stream_type = 0x83
+    source = 'pcm'
+    delay = 0
+
+    def __init__(self, samples, status_first=True):
+        self.samples = samples
+        self.status_first = status_first
+        self.info = {'rate': 48000, 'ch': 2, 'crc': True, 'kbps': 1536,
+                     'mpeg1': True, 'mpeg2': True, 'profile': 2,
+                     'buffer_fullness': 0, 'blocks': 1, 'bits': 16}
+        self.bitrate = None
+
+    def schedule(self, start_T, first_T):
+        step = PCM_SAMPLES_PER_PES
+        self.pes_list = []
+        pos = 0
+        while pos < len(self.samples):
+            chunk = self.samples[pos:pos + step]
+            self.pes_list.append((pos, chunk))
+            pos += step
+        # отбрасываем то, что оказалось бы раньше начала видео
+        self.pes_list = [(o, c) for o, c in self.pes_list
+                         if start_T + o * 90000 // 48000 >= first_T]
+        self.start_T = start_T
+        self.packets = []                       # (время доставки, PES-индекс)
+        self.built = {}
+        self.nchunks = len(self.pes_list)
+        self.next = 0
+        self.pending = []                       # (срок, TS-пакет) — раздаём по одному
+        self.duration = len(self.samples) / 48000.0
+        self.chunk = step
+
+    def deliver_time(self, j):
+        off = self.pes_list[j][0]
+        return self.start_T + off * 90000 // 48000 - int(AUDIO_LEAD * 90000)
+
+    def pes(self, j, offset):
+        off, chunk = self.pes_list[j]
+        body = pack_smpte302(chunk, self.status_first)
+        head = bytes((len(body) >> 8, len(body) & 255, 0x00, 0x00))   # SMPTE 302M
+        payload = head + body
+        pts = self.start_T + off * 90000 // 48000 - offset
+        hdr = bytes((0x87, 0x80, 0x0F)) + encode_pts(pts) + b'\xff' * 10   # как у деки
+        n = len(hdr) + len(payload)
+        return b'\x00\x00\x01\xbd' + bytes((n >> 8, n & 255)) + hdr + payload
+
+    def tail_pes(self, offset):
+        return None
+
+
 class AudioTrack:
     """Один звуковой ES (AAC ADTS или MPEG-1 Layer II) и его нарезка на PES."""
 
     def __init__(self, data, source, delay, codec='aac'):
-        if codec == 'mp2':
+        if codec == 'ac3':
+            frames, info = ac3_frames(data)
+            if not frames or not info:
+                raise SystemExit('в звуке не найдено кадров AC-3')
+            self.samples_per_frame = info['spf']
+            self.stream_type = 0x81
+        elif codec == 'mp2':
             frames, info = mpa_frames(data)
             if not frames or not info:
                 raise SystemExit('в звуке не найдено кадров MPEG audio')
@@ -2803,7 +2999,7 @@ class AudioTrack:
         covered = sum(n for _, n in frames)
         if covered < 0.5 * len(data) or len(frames) < 2:
             raise SystemExit('%s: файл не похож на поток %s — распознано лишь %d кадров (%d из %d байт)'
-                             % ('звук', 'MPEG Layer II' if codec == 'mp2' else 'ADTS AAC',
+                             % ('звук', {'mp2': 'MPEG Layer II', 'ac3': 'AC-3'}.get(codec, 'ADTS AAC'),
                                 len(frames), covered, len(data)))
         self.codec = codec
         self.data, self.frames, self.info, self.source, self.delay = data, frames, info, source, delay
@@ -2831,6 +3027,9 @@ class AudioTrack:
         k = bisect.bisect_right(self.starts, j * self.chunk) - 1
         return self.pts[max(k, 0)] - int(AUDIO_LEAD * 90000)
 
+    def stream_id(self):
+        return 0xBD if self.codec == 'ac3' else 0xC0
+
     def tail_pes(self, offset):
         """Если отправка остановилась посреди кадра — дослать его до конца (короткий PES)."""
         import bisect
@@ -2844,7 +3043,7 @@ class AudioTrack:
         payload = self.es[pos:end]
         hdr = b'\x80\x00\x07' + b'\xff' * 7
         n = len(hdr) + len(payload)
-        return b'\x00\x00\x01\xc0' + bytes((n >> 8, n & 255)) + hdr + payload
+        return bytes((0x00, 0x00, 0x01, self.stream_id())) + bytes((n >> 8, n & 255)) + hdr + payload
 
     def pes(self, j, offset):
         import bisect
@@ -2857,7 +3056,7 @@ class AudioTrack:
         else:
             hdr = b'\x80\x00\x07' + b'\xff' * 7
         n = len(hdr) + len(payload)
-        return b'\x00\x00\x01\xc0' + bytes((n >> 8, n & 255)) + hdr + payload
+        return bytes((0x00, 0x00, 0x01, self.stream_id())) + bytes((n >> 8, n & 255)) + hdr + payload
 
 
 def pcr_only_packet(pkt):
@@ -3312,12 +3511,23 @@ class Muxer:
             bitrate = per_track(bitrates, n, None)
             if bitrate is None:
                 src_ch = want_ch or wav_channels(path)
-                if kind in ('mp2', 'mp2file'):
+                if kind in ('ac3', 'ac3file'):
+                    bitrate = {1: 96, 6: 448}.get(src_ch, 192)  # 448 на 5.1 — как на лентах D-Theater
+                elif kind in ('mp2', 'mp2file'):
                     bitrate = 192 if src_ch == 1 else 256      # обычный для DVB Layer II
                 else:
                     bitrate = {1: 144, 6: 384}.get(src_ch, 256)
-            codec = 'mp2' if kind in ('mp2', 'mp2file') else 'aac'
-            if kind == 'mp2':
+            codec = ('pcm' if kind == 'pcm' else 'ac3' if kind in ('ac3', 'ac3file')
+                     else 'mp2' if kind in ('mp2', 'mp2file') else 'aac')
+            if kind == 'pcm':
+                log('Читаю PCM %s ...' % path)
+                tr = PcmTrack(read_pcm_48k(path, a.ffmpeg, self.warn), a.pcm_bit_order == 'dvhs')
+                enc = 'pcm'
+                data = None
+            elif kind == 'ac3':
+                log('Кодирую звук %s в AC-3 (%d кбит/с) ...' % (path, bitrate))
+                data, enc = encode_wav_to_ac3(path, bitrate, want_ch, self.warn)
+            elif kind == 'mp2':
                 log('Кодирую звук %s в MP2 (%d кбит/с) ...' % (path, bitrate))
                 data, enc = encode_wav_to_mp2(path, a.mp2_encoder, bitrate, want_ch, self.warn)
             elif kind == 'wav':
@@ -3325,16 +3535,24 @@ class Muxer:
                 data, enc = encode_wav_to_adts(path, a.aac_encoder, bitrate, want_ch, self.warn)
             else:
                 data, enc = bytearray(open(path, 'rb').read()), 'file'
-            table = MP2_ENCODER_DELAY if codec == 'mp2' else AAC_ENCODER_DELAY
+            table = {'mp2': MP2_ENCODER_DELAY, 'ac3': AC3_ENCODER_DELAY}.get(codec, AAC_ENCODER_DELAY)
             given = per_track(delays, n, None)
-            delay = table.get(enc, 0) if given is None else given
-            if enc == 'file' and given is None and codec != 'mp2':
+            delay = 0 if codec == 'pcm' else (table.get(enc, 0) if given is None else given)
+            if enc == 'file' and given is None and codec not in ('mp2', 'pcm'):
                 log('%s: кодировщик готового файла неизвестен, беру задержку %d отсч. (%.0f мс). '
                     'Если звук уедет — задайте --audio-delay-samples' % (path, delay, delay * 1000 / 48000))
-            tr = AudioTrack(data, enc, delay, codec)
+            if codec != 'pcm':
+                tr = AudioTrack(data, enc, delay, codec)
+            else:
+                tr.delay = delay
             if tr.info['rate'] != 48000:
                 self.warn('%s: %d Гц (на BS звук 48 кГц)' % (path, tr.info['rate']))
-            if codec == 'mp2':
+            if codec == 'ac3':
+                log('%s: Dolby Digital (AC-3), stream_type 0x81 — такой звук на лентах D-Theater' % path)
+            elif codec == 'pcm':
+                log('%s: линейный PCM (SMPTE 302M), stream_type 0x83 — как пишет дека в режиме STD; '
+                    'порядок бит: %s' % (path, 'D-VHS' if tr.status_first else 'ffmpeg'))
+            elif codec == 'mp2':
                 log('%s: MPEG-1 Layer II, stream_type 0x%02X — для дек, не понимающих AAC; '
                     'японские приёмники такую дорожку игнорируют' % (path, tr.stream_type))
 
@@ -3395,6 +3613,18 @@ class Muxer:
     def check_dvhs_audio(self, tr, path):
         """Требования IEC 60774-5 (D-VHS), приложение A.2.8 — то, чего ждёт дека."""
         i = tr.info
+        if tr.codec == 'pcm':
+            if i['rate'] != 48000 or i['ch'] != 2:
+                self.warn('%s: D-VHS требует для PCM ровно 48 кГц и два канала' % path)
+            return
+        if tr.codec == 'ac3':
+            if i['rate'] != 48000:
+                self.warn('%s: %d Гц; D-VHS требует для AC-3 48 кГц' % (path, i['rate']))
+            if i['kbps'] > 640:
+                self.warn('%s: %d кбит/с — выше предела 640 для AC-3' % (path, i['kbps']))
+            if i['acmod'] == 0:
+                self.warn('%s: режим 1+1 стандартом D-VHS запрещён' % path)
+            return
         if i['rate'] not in (32000, 44100, 48000):
             self.warn('%s: частота %d Гц; D-VHS допускает 32, 44,1 и 48 кГц' % (path, i['rate']))
         if not i['crc']:
@@ -3684,6 +3914,18 @@ class Muxer:
             if due:
                 self.emit_si(out, T, due[:1])          # по одной таблице за раз
         for tr in self.new_audio:
+            if tr.codec == 'pcm':
+                # PES линейного PCM — это ~44 пакета; раздаём их равномерно
+                # по длительности куска, как делает дека (у неё максимум 2 подряд)
+                if not tr.pending and tr.next < tr.nchunks and tr.deliver_time(tr.next) <= T:
+                    data = pes_packets(tr.pid, tr.pes(tr.next, self.offset), self.cc)
+                    pkts = [data[i:i + TS] for i in range(0, len(data), TS)]
+                    span = PCM_SAMPLES_PER_PES * 90000 // 48000
+                    tr.pending = [(T + span * k // max(1, len(pkts)), q) for k, q in enumerate(pkts)]
+                    tr.next += 1
+                if tr.pending and tr.pending[0][0] <= T:
+                    self.emit(out, tr.pid, tr.pending.pop(0)[1])
+                continue
             if tr.next < tr.nchunks and tr.deliver_time(tr.next) <= T:
                 self.emit(out, tr.pid, pes_packets(tr.pid, tr.pes(tr.next, self.offset), self.cc))
                 tr.next += 1
@@ -3911,14 +4153,20 @@ class Muxer:
             n = self.new_audio.index(tr)
             n_keep = len([e for e in self.src_pmt['es'] if is_audio_es(e)]) if self.a.keep_audio else 0
             lang = per_track(self.audio_langs, n + n_keep, b'jpn')
-            fmt = ('MPEG-%d Layer II %d кбит/с' % (1 if i['mpeg1'] else 2, i['kbps'])) if tr.codec == 'mp2' else (
-                '%s AAC-LC' % ('MPEG-2' if i['mpeg2'] else 'MPEG-4'))
+            fmt = ('Dolby Digital %d кбит/с%s' % (i['kbps'], ' (5.1)' if i.get('lfe') and i['ch'] == 6 else '')
+                   if tr.codec == 'ac3' else
+                   'линейный PCM 16 бит (SMPTE 302M)' if tr.codec == 'pcm' else
+                   ('MPEG-%d Layer II %d кбит/с' % (1 if i['mpeg1'] else 2, i['kbps'])) if tr.codec == 'mp2' else (
+                '%s AAC-LC' % ('MPEG-2' if i['mpeg2'] else 'MPEG-4')))
             log('Звук %d: %s → PID 0x%04X, tag 0x%02X, %s%s%s: %s %d Гц %d кан., %s, кодер %s (задержка %d отсч.), '
                 '%.1f с%s' % (n + 1, tr.path, self.pid_map.get(tr.pid, tr.pid), tr.tag, lang.decode(),
                               (' «%s»' % tr.name) if tr.name else '', (', сдвиг %+.3f с' % tr.offset) if tr.offset else '',
                               fmt, i['rate'], i['ch'],
                               'CRC' if i['crc'] else 'без CRC', tr.source, tr.delay, tr.duration,
-                              ('; не вошло в видео: %.1f с' % (left * tr.chunk / max(1, len(tr.es)) * tr.duration)) if left > 2 else ''))
+                              ('; не вошло в видео: %.1f с' % (left * tr.chunk / 48000.0
+                                                               if tr.codec == 'pcm' else
+                                                               left * tr.chunk / max(1, len(tr.es)) * tr.duration))
+                              if left > 2 else ''))
         before = self.copy_before or copy_control_values(self.src_pmt['descs'])
         after = self.copy_after or copy_control_values(self.pmt_info['descs'])
         self.warn_output_protection(after)
@@ -4070,6 +4318,16 @@ def main():
                     help='дорожка MPEG-1 Layer II (stream_type 0x03) — её ждут деки, не понимающие AAC')
     ap.add_argument('--mp2-encoder', choices=['auto', 'libtwolame', 'mp2'], default='auto',
                     help='кодировщик MP2 (по умолчанию libtwolame, если он есть в ffmpeg)')
+    ap.add_argument('--audio-ac3', action=TrackAction, dest='audio_tracks', metavar='WAV|AC3',
+                    help='дорожка Dolby Digital (AC-3, stream_type 0x81) — такой звук на лентах D-Theater; '
+                         '48 кГц, до 640 кбит/с')
+    ap.add_argument('--audio-pcm', action=TrackAction, dest='audio_tracks', metavar='WAV',
+                    help='дорожка линейного PCM (SMPTE 302M, stream_type 0x83) — такой звук дека пишет '
+                         'в режиме STD, встречается и на лентах D-Theater; всегда 48 кГц, 16 бит, стерео')
+    ap.add_argument('--ffmpeg', default='ffmpeg', help='путь к ffmpeg')
+    ap.add_argument('--pcm-bit-order', choices=['dvhs', 'ffmpeg'], default='dvhs',
+                    help='порядок бит в 20-битном поле 302M: dvhs — как у деки (по умолчанию), '
+                         'ffmpeg — как кодирует ffmpeg')
     ap.add_argument('--keep-audio', action='store_true', help='оставить исходный звук и добавить дорожки после него')
     ap.add_argument('--audio-name', action='append', metavar='NAME',
                     help='название новой дорожки в EIT/SIT (по порядку), например "日本語" или "Русский"')
