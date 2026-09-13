@@ -1109,3 +1109,10 @@ python3 arib_caption_mux.py --help
 звуку, поле CGMS в заголовке ленты, механизм шифрования D-Theater.
 
 Не проверялось: поведение D-VHS других производителей.
+
+## Спасибо проектам:
+
+https://github.com/xqq/libaribcaption
+https://github.com/nu774/fdkaac
+https://github.com/ffmpeg/ffmpeg
+https://github.com/njh/twolame
