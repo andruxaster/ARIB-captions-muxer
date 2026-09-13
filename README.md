@@ -888,7 +888,11 @@ python3 arib_caption_mux.py my.m2t episode.ass -o out.m2t \
     --audio jp.wav --audio-bitrate 256 \
     --si broadcast --arib-pids \
     --out-service-id 171 --ts-id 0x4012 --network-id 4 \
-    --service-name "ＢＳテスト" --event-name "Серия 1" --genre anime \
+    --service-name "ＢＳテスト" --event-name "Yowayowa Sensei e01" \
+    --event-text "The series follows Akihito Abikura, \
+    a second-year high school student. His new homeroom teacher \
+    is Hiyori Hiwamura, an English teacher who recently \
+    graduated from university." --genre anime \
     --caption-lang rus --jst "2026-08-02 07:00:00" \
     --copy free
 ```
