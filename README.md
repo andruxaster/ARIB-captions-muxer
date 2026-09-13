@@ -1,3 +1,5 @@
+<p align="center"><img width="400" height="92" alt="LLMdevelopment" src="https://github.com/user-attachments/assets/9a3c3610-271d-4f9b-959b-bed32bcb9461" /></p>
+
 # arib_caption_mux.py — руководство
 
 Скрипт собирает MPEG-2 Transport Stream, который японская дека D-VHS
