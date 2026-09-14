@@ -2150,6 +2150,53 @@ def diff_files(a, b):
 
 
 # ---------------------------------------------------------------------------
+# Формат лент D-Theater / D-VHS (IEC 60774-5, приложение A.3)
+# ---------------------------------------------------------------------------
+#
+# Лента устроена иначе, чем эфирный partial TS. Разобрано на демо-ленте:
+#   * только PAT, PMT и элементарные потоки — никаких NIT/SDT/EIT/TOT, а на
+#     этой ленте нет и SIT (стандарт его допускает, но пишет не всегда);
+#   * поток постоянной скорости, добитый null-пакетами (на ленте 8,9% null);
+#   * PAT и PMT повторяются около 20 раз в секунду;
+#   * управление копированием несёт DTCP_descriptor, а не ARIB-овские 0xC1/0xDE
+#     («Copy_control_descriptor of D-VHS shall be carried by using the
+#     DTCP_descriptor», A.3.2.2.2);
+#   * в PMT обязательны registration MTRM, maximum_bitrate и smoothing_buffer.
+
+DTCP_CCI = {'free': 0b00, 'no-more': 0b01, 'once': 0b10, 'never': 0b11}
+DTCP_CCI_NAMES = {0b00: 'копирование свободно', 0b01: 'больше копий нет',
+                  0b10: 'одна копия', 0b11: 'копирование запрещено'}
+
+
+def mtrm_descriptor(version=0x10):
+    """registration MTRM: помечает поток как D-VHS-совместимый (A.3.2.2.1.1).
+    Версия 1.0 кодируется как 0x10, вокруг неё зарезервированные единицы."""
+    return b'\x05\x0a' + b'MTRM' + bytes((0xFF, version)) + b'\xff\xff\xff\xff'
+
+
+def dtcp_descriptor(cci=0b11, epn=1, ict=1, aps=0):
+    """DTCP_descriptor (0x88): CA_System_ID = 0x0FFF (DTLA) и байт с EPN,
+    DTCP_CCI, Image_Constraint_Token и APS."""
+    v = 0x80 | (epn << 6) | ((cci & 3) << 4) | 0x08 | ((ict & 1) << 2) | (aps & 3)
+    return bytes((0x88, 4, 0x0F, 0xFF, v, v))
+
+
+def maximum_bitrate_descriptor(bps):
+    v = int(bps / 8 / 50)                      # единицы 50 байт/с
+    return bytes((0x0E, 3, 0xC0 | ((v >> 16) & 0x3F), (v >> 8) & 255, v & 255))
+
+
+def smoothing_buffer_descriptor(leak_bps, size_bytes):
+    leak = int(leak_bps / 400)                 # единицы 400 бит/с
+    return bytes((0x10, 6, 0xC0 | ((leak >> 16) & 0x3F), (leak >> 8) & 255, leak & 255,
+                  0xC0 | ((size_bytes >> 16) & 0x3F), (size_bytes >> 8) & 255, size_bytes & 255))
+
+
+def null_packet(cc=0):
+    return bytes((0x47, 0x1F, 0xFF, 0x10 | (cc & 0x0F))) + b'\xff' * 184
+
+
+# ---------------------------------------------------------------------------
 # Дескрипторы SIT / DIT
 # ---------------------------------------------------------------------------
 
@@ -3247,15 +3294,20 @@ class Muxer:
         self.sid, self.pmt_pid = svc
         self.src_pmt = probe.pmts[self.pmt_pid]
         self.isdb = probe.nit_id is not None and media_type_for(probe.nit_id) is not None
-        mode = 'keep' if args.no_partial_ts else args.si
-        if mode == 'broadcast' and self.isdb and not args.si_regenerate:
+        mode = 'dtheater' if args.dtheater else ('keep' if args.no_partial_ts else args.si)
+        if mode == 'dtheater':
+            pass
+        elif mode == 'broadcast' and self.isdb and not args.si_regenerate:
             log('Поток уже японский и с полным SI — таблицы остаются исходными (перегенерировать: --si-regenerate).')
             mode = 'keep'
         self.mode = mode
+        self.dtheater = mode == 'dtheater'
         self.partial = mode != 'keep'            # фильтруем PID и строим свою PAT
         self.gen_full = mode in ('broadcast', 'both')
-        self.out_sid = args.out_service_id if (args.out_service_id and self.partial) else self.sid
-        self.tsid = args.ts_id if (args.ts_id is not None and self.partial) else probe.pat['tsid']
+        self.out_sid = args.out_service_id if (args.out_service_id and self.partial) else (
+            1 if mode == 'dtheater' else self.sid)
+        self.tsid = args.ts_id if (args.ts_id is not None and self.partial) else (
+            1 if mode == 'dtheater' else probe.pat['tsid'])
         self.pat_version = probe.pat['version']
         self.video_info = {es['pid']: parse_video_info(bytes(probe.es_head.get(es['pid'], b'')), es['type'])
                            for es in self.src_pmt['es'] if es['type'] in VIDEO_TYPES}
@@ -3294,6 +3346,14 @@ class Muxer:
         self._setup_caption_es()
         self._setup_superimpose()
         self._setup_pid_map()
+        self.dt_rate = 0
+        if self.dtheater:                      # скорость ленты нужна уже при сборке PMT
+            buckets = probe.buckets[1:-1] or probe.buckets      # корзины по 0,5 с
+            counts = [sum(b.values()) for b in buckets] or [0]
+            src_rate = max(counts) * TS * 8 * 2
+            extra = sum((t.bitrate or t.info.get('kbps', 0)) * 1000 for t in self.new_audio)
+            self.dt_rate = (args.dtheater_rate * 1e6 if args.dtheater_rate
+                            else min(28.2e6, max((src_rate + extra) * 1.25, 6e6)))
         self._rebuild_pmt(self.src_pmt)
         # SI для SIT. SDT/EIT/TOT берём только из японского потока: в DVB/ATSC
         # другая кодировка строк и TOT в UTC, а не в JST.
@@ -3331,8 +3391,9 @@ class Muxer:
         if self.network_id is None:
             self.network_id = 0x0004
             mt = mt or b'BS'
-            (log if self.gen_full else self.warn)(
-                'NIT не найдена: network_id=0x0004, media_type=BS (задайте --network-id/--media-type)')
+            if not self.dtheater:              # на ленте сети нет вообще
+                (log if self.gen_full else self.warn)(
+                    'NIT не найдена: network_id=0x0004, media_type=BS (задайте --network-id/--media-type)')
         if mt is None:
             mt = b'BS'
             self.warn('неизвестный network_id 0x%04X, media_type=BS (задайте --media-type)' % self.network_id)
@@ -3370,6 +3431,8 @@ class Muxer:
         self.last_pcr_T = None
         self.since_pcr = 0
         self.peak_rate_seen = (0.0, 0.0)
+        self.nulls = 0
+        self.out_pkts = 0
         self.tick_per_pkt = 0.0
         self.bytes_out = 0
 
@@ -3512,7 +3575,7 @@ class Muxer:
             if bitrate is None:
                 src_ch = want_ch or wav_channels(path)
                 if kind in ('ac3', 'ac3file'):
-                    bitrate = {1: 96, 6: 448}.get(src_ch, 192)  # 448 на 5.1 — как на лентах D-Theater
+                    bitrate = {1: 96, 6: 576}.get(src_ch, 192)  # 576 на 5.1 — как на лентах D-Theater
                 elif kind in ('mp2', 'mp2file'):
                     bitrate = 192 if src_ch == 1 else 256      # обычный для DVB Layer II
                 else:
@@ -3589,6 +3652,25 @@ class Muxer:
     def _setup_pid_map(self):
         """--arib-pids: PMT 0x01F0, видео 0x0100.., звук 0x0110.., отдельный PCR 0x01FF — как на BS."""
         self.pid_map = {}
+        if self.dtheater:
+            src = self.src_pmt
+            want = {self.pmt_pid: 0x0010}
+            nv, na = 0x0011, 0x0014
+            for es in src['es']:
+                if es['type'] in VIDEO_TYPES:
+                    want[es['pid']], nv = nv, nv + 1
+            for t in self.new_audio:
+                t.pid, na = na, na + 1        # даём ленточные PID сразу, без переназначения
+            for es in src['es']:
+                if is_audio_es(es) and es['pid'] not in want and es['pid'] not in self.old_audio_pids:
+                    want[es['pid']], na = na, na + 1
+            taken = set()
+            for old, new in want.items():
+                if new not in taken:
+                    self.pid_map[old] = new
+                    taken.add(new)
+            self.out_pmt_pid = self.pid_map.get(self.pmt_pid, self.pmt_pid)
+            return
         if not (self.a.arib_pids and self.partial):
             self.out_pmt_pid = self.pmt_pid
             return
@@ -3721,8 +3803,19 @@ class Muxer:
         self.cap_pid, self.cap_tag = self.cap_tracks[0].pid, self.cap_tracks[0].tag
 
     def _rebuild_pmt(self, src):
-        info = {'program': self.out_sid, 'pcr_pid': src['pcr_pid'],
-                'descs': apply_copy_control(src['descs'], self.a, create=True), 'es': []}
+        if self.dtheater:
+            descs = [d for d in src['descs'] if d[0] not in (0x05, 0x88, 0x0E, 0x10, 0xC1, 0xDE, 0x09)]
+            a = self.a
+            rate = int(self.dt_rate)
+            descs = [mtrm_descriptor(),
+                     dtcp_descriptor(DTCP_CCI[a.dtcp_cci], 0 if a.dtcp_epn_asserted else 1,
+                                     0 if a.dtcp_no_image_constraint else 1, a.dtcp_aps),
+                     maximum_bitrate_descriptor(rate),
+                     smoothing_buffer_descriptor(rate, a.smoothing_buffer)] + descs
+            info = {'program': self.out_sid, 'pcr_pid': src['pcr_pid'], 'descs': descs, 'es': []}
+        else:
+            info = {'program': self.out_sid, 'pcr_pid': src['pcr_pid'],
+                    'descs': apply_copy_control(src['descs'], self.a, create=True), 'es': []}
         strip_ca = self.partial and not self.a.keep_ca
         if strip_ca:
             info['descs'] = [d for d in info['descs'] if d[0] != 0x09]
@@ -3739,8 +3832,12 @@ class Muxer:
         inserted = False
         drop_types = {0x0D, 0x0B} if self.a.drop_data else set()
         audio_done = False
-        new_audio_es = [{'type': t.stream_type, 'pid': t.pid, 'descs': [bytes((0x52, 1, t.tag))]}
-                        for t in self.new_audio]
+        new_audio_es = []
+        for t in self.new_audio:
+            d = [bytes((0x52, 1, t.tag))]
+            if t.codec == 'ac3':
+                d.append(b'\x05\x04AC-3')        # как на ленте D-Theater
+            new_audio_es.append({'type': t.stream_type, 'pid': t.pid, 'descs': d})
         for es in src['es']:
             if es['type'] in drop_types:
                 continue
@@ -3755,7 +3852,10 @@ class Muxer:
                 continue
             descs = apply_copy_control([d for d in es['descs'] if not (strip_ca and d[0] == 0x09)], self.a)
             vi = self.video_info.get(es['pid'])
-            if self.partial and es['type'] == 0x02 and vi and 'h' in vi and not any(d[0] == 0xC8 for d in descs):
+            if self.dtheater:
+                descs = [d for d in descs if d[0] not in (0xC8, 0xC1, 0xDE, 0xFD, 0x09)]
+            if self.partial and not self.dtheater and es['type'] == 0x02 and vi and 'h' in vi \
+                    and not any(d[0] == 0xC8 for d in descs):
                 fmt = video_component_type(vi)[1]         # video_decode_control_descriptor, как на BS
                 descs.append(bytes((0xC8, 1, 0x40 | (fmt << 2) | 3)))
             if self.partial and component_tag(es) is None:
@@ -3853,7 +3953,9 @@ class Muxer:
     # -- вывод --------------------------------------------------------------
     def emit(self, out, pid, data):
         out += data
-        self.stats[pid] = self.stats.get(pid, 0) + len(data) // TS
+        n = len(data) // TS
+        self.stats[pid] = self.stats.get(pid, 0) + n
+        self.out_pkts += n
 
     def emit_psi(self, out, T):
         if self.partial:
@@ -3889,6 +3991,18 @@ class Muxer:
         self.last_raw = raw
         self.offset = self.T - raw
 
+    def pad_cbr(self, out):
+        """Лента пишется с постоянной скоростью, поэтому поток добивается
+        null-пакетами: на демо-ленте их 8,9%."""
+        if self.T_start_out is None:
+            return
+        elapsed = (self.T - self.T_start_out) / 90000.0
+        want = int(elapsed * self.dt_rate / (TS * 8))
+        while self.out_pkts < want:
+            out += null_packet(self.cc.next(PID_NULL))
+            self.out_pkts += 1
+            self.nulls += 1
+
     def schedule(self, out, T=None):
         """Отправка того, чей срок подошёл. Вызывается на каждом выходном пакете
         с временем, интерполированным между PCR, и за один вызов отправляет не
@@ -3909,6 +4023,10 @@ class Muxer:
         if self.generate_sit and T >= self.next_sit:
             self.emit(out, PID_SIT, section_packets(PID_SIT, self.build_sit(T), self.cc))
             self.next_sit = T + int(self.a.sit_interval * 90000)
+        if self.dtheater and T >= getattr(self, 'next_psi', 0):
+            self.emit(out, PID_PAT, section_packets(PID_PAT, self.pat_section(), self.cc))
+            self.emit(out, self.out_pmt_pid, section_packets(self.out_pmt_pid, self.pmt_section, self.cc))
+            self.next_psi = T + int(self.a.psi_interval * 90000)
         if self.gen_full:
             due = [k for k in SI_PERIODS if T >= self.next_si.get(k, 0)]
             if due:
@@ -3995,7 +4113,9 @@ class Muxer:
                         self._on_section(pid, sec)
             keep = True
             if pid == PID_PAT:
-                if self.partial:
+                if self.dtheater:
+                    keep = False
+                elif self.partial:
                     keep = False
                     if pkt[1] & 0x40:
                         self.emit(out, PID_PAT, section_packets(PID_PAT, self.pat_section(), self.cc))
@@ -4008,7 +4128,7 @@ class Muxer:
                     pkt = None
             elif pid == self.pmt_pid:
                 keep = False
-                if pkt[1] & 0x40:
+                if pkt[1] & 0x40 and not self.dtheater:
                     self.emit(out, self.out_pmt_pid, section_packets(self.out_pmt_pid, self.pmt_section, self.cc))
             elif pid in self.old_audio_pids:
                 keep = False
@@ -4021,6 +4141,8 @@ class Muxer:
                 keep = False
             elif self.partial and (pid not in self.keep_pids or (pid == PID_SIT and self.generate_sit)):
                 keep = False
+            if self.dtheater and self.T is not None:
+                self.pad_cbr(out)
             if keep:
                 np = self.pid_map.get(pid)
                 if np is not None:
@@ -4030,6 +4152,7 @@ class Muxer:
                 else:
                     out += pkt
                 self.stats[pid] = self.stats.get(pid, 0) + 1
+                self.out_pkts += 1
             self.since_pcr += 1
             if self.T is not None:
                 self.schedule(out, self.T + int(self.since_pcr * self.tick_per_pkt))
@@ -4184,9 +4307,17 @@ class Muxer:
                 '' if 0xC1 not in before else ''))
         if self.pid_map:
             log('PID переназначены: ' + ', '.join('0x%04X→0x%04X' % kv for kv in sorted(self.pid_map.items()) if kv[0] != kv[1]))
+        if self.dtheater:
+            log('Режим: лента D-Theater — PAT и PMT, без SI; постоянная скорость %.3f Мбит/с' % (self.dt_rate / 1e6))
+            log('  DTCP: CCI=%s, EPN=%d, ICT=%d, APS=%d' % (
+                DTCP_CCI_NAMES[DTCP_CCI[self.a.dtcp_cci]], 0 if self.a.dtcp_epn_asserted else 1,
+                0 if self.a.dtcp_no_image_constraint else 1, self.a.dtcp_aps))
+            if self.out_pkts:
+                log('  null-пакетов: %d (%.1f%% потока)' % (self.nulls, 100.0 * self.nulls / self.out_pkts))
         log('Режим SI: %s' % {'partial': 'partial TS для D-VHS (PAT/PMT/SIT/DIT)',
                               'broadcast': 'как в эфире (PAT/PMT/NIT/SDT/EIT/TOT/BIT)',
-                              'both': 'эфирные таблицы + SIT', 'keep': 'исходный поток без изменений'}[self.mode])
+                              'both': 'эфирные таблицы + SIT', 'keep': 'исходный поток без изменений',
+                              'dtheater': 'лента D-Theater'}[self.mode])
         if self.gen_full and self.event:
             g = GENRES[self.a.genre] >> 4
             dvb = DVB_GENRE_NAMES.get(g)
@@ -4214,6 +4345,9 @@ class Muxer:
                 log('Внимание: звук не AAC — встроенный BS-декодер японских дек его не воспроизведёт '
                     '(запись битстрима при этом возможна).')
             peak, at = self.peak_rate_seen
+            if self.dtheater and peak > self.dt_rate:
+                self.warn('фактический пик %.1f Мбит/с выше объявленной скорости ленты %.1f — '
+                          'задайте --dtheater-rate побольше' % (peak / 1e6, self.dt_rate / 1e6))
             if peak:
                 log('Пиковая мгновенная скорость (между соседними PCR): %.1f Мбит/с на %.1f с' % (peak / 1e6, at))
                 over = [name for name, lim in DVHS_MODES if peak > lim]
@@ -4289,6 +4423,21 @@ def main():
     ap.add_argument('--event-name', help='название передачи для SIT (short_event_descriptor)')
     ap.add_argument('--event-text', help='описание передачи для SIT')
     ap.add_argument('--jst', help='время начала записи "ГГГГ-ММ-ДД ЧЧ:ММ:СС" (JST), если в потоке нет TOT')
+    ap.add_argument('--dtheater', action='store_true',
+                    help='формат ленты D-Theater: только PAT и PMT, никаких SI, постоянная скорость '
+                         'с добивкой null-пакетами, registration MTRM, управление копированием через '
+                         'DTCP_descriptor')
+    ap.add_argument('--psi-interval', type=float, default=0.047,
+                    help='период PAT/PMT в режиме --dtheater, с (на ленте около 21 раза в секунду)')
+    ap.add_argument('--dtheater-rate', type=float, metavar='МБИТ/С',
+                    help='скорость потока в режиме --dtheater (по умолчанию по пику плюс запас)')
+    ap.add_argument('--dtcp-cci', choices=sorted(DTCP_CCI), default='never',
+                    help='DTCP_CCI на ленте: free, no-more, once, never (по умолчанию never, как на лентах)')
+    ap.add_argument('--dtcp-epn-asserted', action='store_true', help='взвести EPN (бит в 0)')
+    ap.add_argument('--dtcp-no-image-constraint', action='store_true', help='сбросить Image_Constraint_Token')
+    ap.add_argument('--dtcp-aps', type=lambda v: int(v, 0), default=0, help='APS в DTCP_descriptor (0..3)')
+    ap.add_argument('--smoothing-buffer', type=lambda v: int(v, 0), default=950272,
+                    help='размер буфера в smoothing_buffer_descriptor, байт')
     ap.add_argument('--si', choices=['partial', 'broadcast', 'both', 'keep'], default='partial',
                     help='служебные таблицы: partial — partial TS для D-VHS (по умолчанию); broadcast — как в эфире '
                          '(NIT/SDT/EIT/TOT/BIT); both — оба набора; keep — не трогать исходный поток')

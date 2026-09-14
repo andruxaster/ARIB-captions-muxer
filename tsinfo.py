@@ -916,6 +916,7 @@ class TSAnalyzer:
         self.pcr_gap = {}           # pid -> самый долгий интервал между PCR
         self.assemblers = {}
         self.psi_pids = set(BASE_PSI_PIDS)
+        self.es_pids = set()        # PID элементарных потоков — секциями не разбираем
         self.pmt_pids = {}          # pid -> program_number
         self.carousel_pids = set()
         self.caption_pids = {}      # pid -> "caption"/"superimpose"
@@ -1177,6 +1178,11 @@ class TSAnalyzer:
     # -- секции ---------------------------------------------------------------
 
     def _section(self, pid, sec):
+        # В D-VHS и D-Theater PMT лежит на низких PID (0x0010), а элементарные
+        # потоки — на 0x0011 и далее. Поэтому принадлежность к программе важнее
+        # привычных номеров PID: иначе PMT разбирается как NIT, а видео — как SI.
+        if pid in self.es_pids:
+            return
         tid = sec[0]
         syntax = (sec[1] >> 7) & 1
         self.table_counts["0x%02X %s" % (tid, TABLE_NAMES.get(tid, ""))] += 1
@@ -1191,6 +1197,8 @@ class TSAnalyzer:
                 self.cat_descs = parse_descriptors(sec[8:-4], self.charset)
             elif tid == 0x02 and pid in self.pmt_pids:
                 self._pmt(pid, sec)
+            elif pid in self.pmt_pids:
+                return                        # чужие таблицы на PID программы игнорируем
             elif tid in (0x42, 0x46):
                 self._sdt(sec)
             elif tid in (0x40, 0x41):
@@ -1208,6 +1216,9 @@ class TSAnalyzer:
         except Exception:
             pass
 
+    def _note_pmt_pid(self, pid):
+        self.psi_pids.discard(pid)
+
     def _pat(self, sec):
         body = sec[8:-4]
         for i in range(0, len(body) - 3, 4):
@@ -1219,6 +1230,7 @@ class TSAnalyzer:
             else:
                 self.pat[prog] = pid
                 self.pmt_pids[pid] = prog
+                self._note_pmt_pid(pid)
 
     def _pmt(self, pid, sec):
         prog = (sec[3] << 8) | sec[4]
@@ -1239,6 +1251,8 @@ class TSAnalyzer:
                        "pid": epid, "descriptors": descs})
             if stype in (0x0B, 0x0D, 0x08, 0x0A, 0x0C):
                 self.carousel_pids.add(epid)
+            self.es_pids.add(epid)
+            self.psi_pids.discard(epid)
             if stype in (0x03, 0x04, 0x0F, 0x11, 0x81, 0x82, 0x83, 0x87):
                 self.audio_sig.add(epid)
             elif stype == 0x06 and any(d["tag"] == 0xFD and d.get("data_component_id") == 0x0008
