@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-tsinfo.py — инвентаризация вещательного транспортного потока MPEG-2 TS.
+tsinfo.py -- an inventory of an MPEG-2 transport stream.
 
-Ориентирован на ARIB/ISDB (японское вещание, захваты с D-VHS по i.LINK),
-но понимает и обычный DVB. Внешних зависимостей нет, Python 3.8+.
+Aimed at ARIB/ISDB (Japanese broadcast, D-VHS captures over i.LINK) but it
+also understands plain DVB. No external dependencies, Python 3.8+.
 
-Что выводит:
-  * контейнер: размер пакета (188/192/204/208), смещение синхронизации,
-    источниковые метки времени (source packet header) для .m2t с i.LINK
-  * карта PID: трафик, ошибки continuity_counter, скремблирование, PCR, битрейт
+What it prints:
+  * container: packet size (188/192/204/208), sync offset, source packet
+    header timestamps for .m2t captured over i.LINK
+  * PID map: traffic, continuity_counter errors, scrambling, PCR, bit rate
   * PAT / CAT / PMT / SDT / NIT / EIT / TOT / BIT / SDTT / CDT
-  * все дескрипторы, включая ARIB (0xC0–0xFE) с расшифровкой
-  * субтитры: сигнализация в PMT + реальные data group в PES (0x80/0x81),
-    языки и формат из caption management data
-  * карусели данных: DSM-CC секции, DII/DSI/DDB, число и размер модулей
-  * copy control: digital_copy_control (включая copy_control_type и APS),
+  * every descriptor, including the ARIB ones (0xC0-0xFE), decoded
+  * captions: the PMT signalling plus the real data groups in the PES
+    (0x80/0x81), languages and format from the caption management data
+  * data carousels: DSM-CC sections, DII/DSI/DDB, module count and size
+  * copy control: digital_copy_control (including copy_control_type and APS),
     content_availability, DTCP_descriptor (0x88), CA_descriptor,
-    состояние transport_scrambling_control по каждому PID
-  * звук: разбор самих элементарных потоков — AAC (ADTS), MPEG Layer II,
-    AC-3, линейный PCM (SMPTE 302M) — и проверка по IEC 60774-5 (D-VHS)
-  * пригодность для записи на ленту: пиковая мгновенная скорость между
-    соседними PCR и запас до пределов режимов HS/STD, длинные пачки пакетов,
-    интервал PCR, признаки partial TS (SIT/DIT, registration MTRM)
+    the transport_scrambling_control state of every PID
+  * audio: the elementary streams themselves -- AAC (ADTS), MPEG Layer II,
+    AC-3, linear PCM (SMPTE 302M) -- checked against IEC 60774-5 (D-VHS)
+  * fitness for tape: the peak instantaneous rate between adjacent PCRs and
+    the headroom to the HS/STD limits, long packet bursts, the PCR interval,
+    the signs of a partial TS (SIT/DIT, registration MTRM)
 
-Использование:
+Usage:
     python3 tsinfo.py stream.m2t
     python3 tsinfo.py stream.ts --max-mb 64 --events 10
     python3 tsinfo.py stream.ts --json > report.json
@@ -65,7 +65,7 @@ def crc32_mpeg(data):
 
 
 # ---------------------------------------------------------------------------
-# Декодирование текста: ARIB STD-B24 (8-битный набор) и DVB
+# Text decoding: ARIB STD-B24 (the 8-unit code) and DVB
 # ---------------------------------------------------------------------------
 
 _HIRA_EXTRA = {0x77: "ゝ", 0x78: "ゞ", 0x79: "ー", 0x7A: "。",
@@ -73,7 +73,7 @@ _HIRA_EXTRA = {0x77: "ゝ", 0x78: "ゞ", 0x79: "ー", 0x7A: "。",
 _KATA_EXTRA = {0x77: "ヽ", 0x78: "ヾ", 0x79: "ー", 0x7A: "。",
                0x7B: "「", 0x7C: "」", 0x7D: "、", 0x7E: "・"}
 
-# финальные байты escape-последовательностей -> имя набора
+# final bytes of escape sequences -> set name
 _FINAL_1B = {0x4A: "ALNUM", 0x30: "HIRA", 0x31: "KATA", 0x49: "JISX0201K",
              0x36: "ALNUM", 0x37: "HIRA", 0x38: "KATA",
              0x32: "MOSAIC", 0x33: "MOSAIC", 0x34: "MOSAIC", 0x35: "MOSAIC",
@@ -81,7 +81,7 @@ _FINAL_1B = {0x4A: "ALNUM", 0x30: "HIRA", 0x31: "KATA", 0x49: "JISX0201K",
 _FINAL_2B = {0x42: "KANJI", 0x39: "KANJI", 0x3A: "KANJI", 0x3B: "GAIJI",
              0x20: "DRCS2"}
 
-# C0/C1: сколько байт параметров пропустить после кода
+# C0/C1: how many parameter bytes to skip after the code
 _C0_PARAM = {0x16: 1, 0x1C: 2, 0x1F: 1}
 _C1_PARAM = {0x8B: 1, 0x90: 1, 0x91: 1, 0x92: 1, 0x93: 1,
              0x94: 1, 0x97: 1, 0x98: 1, 0x9D: 2}
@@ -95,7 +95,7 @@ def _jis2(b1, b2):
 
 
 def decode_arib(data):
-    """Грубый, но практичный декодер 8-битного набора ARIB STD-B24."""
+    """A rough but practical decoder for the 8-unit code of ARIB STD-B24."""
     g = ["KANJI", "ALNUM", "HIRA", "KATA"]
     gl, gr = 0, 2
     out = []
@@ -108,7 +108,7 @@ def decode_arib(data):
                 break
             e = data[i]
             i += 1
-            if e == 0x24:  # 2-байтовые наборы
+            if e == 0x24:  # two-byte sets
                 if i < n and data[i] in (0x28, 0x29, 0x2A, 0x2B):
                     slot = data[i] - 0x28
                     i += 1
@@ -120,7 +120,7 @@ def decode_arib(data):
                 elif i < n:
                     g[0] = _FINAL_2B.get(data[i], "KANJI")
                     i += 1
-            elif e in (0x28, 0x29, 0x2A, 0x2B):  # 1-байтовые наборы
+            elif e in (0x28, 0x29, 0x2A, 0x2B):  # one-byte sets
                 slot = e - 0x28
                 if i < n and data[i] == 0x20:  # DRCS
                     i += 1
@@ -239,11 +239,11 @@ def decode_dvb(data):
 
 
 def decode_text(data, charset="auto"):
-    """auto = сначала ARIB (инструмент нацелен на ISDB).
+    """auto tries ARIB first (this tool targets ISDB).
 
-    7-битный диапазон ARIB неотличим от ASCII: по умолчанию G0=KANJI, поэтому
-    латинские названия из DVB-потока в режиме auto превратятся в кандзи-мусор.
-    Для DVB укажите --charset dvb, для чистого ASCII --charset ascii.
+    The 7-bit range of ARIB is indistinguishable from ASCII: G0 defaults to
+    KANJI, so Latin names from a DVB stream turn into kanji noise in auto mode.
+    For DVB pass --charset dvb, for plain ASCII --charset ascii.
     """
     if not data:
         return ""
@@ -262,7 +262,7 @@ def decode_text(data, charset="auto"):
 
 
 # ---------------------------------------------------------------------------
-# Справочники
+# Lookup tables
 # ---------------------------------------------------------------------------
 
 STREAM_TYPES = {
@@ -315,35 +315,35 @@ DESC_NAMES = {
 }
 
 DATA_COMPONENT_ID = {
-    0x0007: "данные (BS/CS, BML)",
-    0x0008: "субтитры /文字スーパー (ARIB STD-B24)",
-    0x000C: "данные (наземное ЦТВ, BML)",
-    0x000D: "накопительное/загружаемое вещание",
-    0x000E: "мультимедиа-загрузка",
+    0x0007: "data (BS/CS, BML)",
+    0x0008: "captions / superimpose (ARIB STD-B24)",
+    0x000C: "data (terrestrial, BML)",
+    0x000D: "storage / download broadcasting",
+    0x000E: "multimedia download",
 }
 
-COPY_CONTROL = {0: "copy free (свободное копирование)",
-                1: "определяется другими средствами",
-                2: "copy once (одна копия)",
-                3: "copy never (копирование запрещено)"}
+COPY_CONTROL = {0: "copy free",
+                1: "defined by other means",
+                2: "copy one generation",
+                3: "copy never"}
 
-APS_CONTROL = {0: "APS выкл.", 1: "APS тип 1", 2: "APS тип 2", 3: "APS тип 3"}
+APS_CONTROL = {0: "APS off", 1: "APS type 1", 2: "APS type 2", 3: "APS type 3"}
 
-# Младшие 4 бита дескриптора 0xC1: эксплуатационные правила ARIB задают им смысл.
-# Значение 00 у copy_control_type не определено, и приёмник трактует содержимое
-# как защищённое — «копирование свободно» с нулевым нибблом ведёт себя как запрет.
-COPY_CONTROL_TYPE = {0: "не задан (приёмник считает содержимое защищённым)",
-                     1: "выход шифруется (DTCP)",
-                     2: "зарезервировано",
-                     3: "выход без шифрования"}
+# The low 4 bits of descriptor 0xC1: the ARIB operational rules give them meaning.
+# A copy_control_type of 00 is undefined and the receiver treats the content as
+# protected, so "copy free" with a zero nibble behaves like a ban.
+COPY_CONTROL_TYPE = {0: "undefined (the receiver treats the content as protected)",
+                     1: "output is encrypted (DTCP)",
+                     2: "reserved",
+                     3: "output without encryption"}
 DTCP_CCI = {0: "copy free", 1: "no more copies", 2: "copy one generation", 3: "copy never"}
 
-SERVICE_TYPES = {0x01: "цифровое ТВ", 0x02: "цифровое радио",
-                 0x0C: "передача данных", 0xA1: "спец. видео",
-                 0xA2: "спец. аудио", 0xA3: "спец. данные",
-                 0xA4: "инженерный сервис", 0xA5: "промо-видео",
-                 0xA6: "промо-аудио", 0xA7: "промо-данные",
-                 0xAD: "суперHD (4K)"}
+SERVICE_TYPES = {0x01: "digital TV", 0x02: "digital radio",
+                 0x0C: "data broadcasting", 0xA1: "special video",
+                 0xA2: "special audio", 0xA3: "special data",
+                 0xA4: "engineering service", 0xA5: "promo video",
+                 0xA6: "promo audio", 0xA7: "promo data",
+                 0xAD: "super hi-vision (4K)"}
 
 TABLE_NAMES = {0x00: "PAT", 0x01: "CAT", 0x02: "PMT", 0x03: "TSDT",
                0x3A: "DSM-CC MPE", 0x3B: "DSM-CC UN (DII/DSI)",
@@ -360,14 +360,14 @@ WELL_KNOWN_PIDS = {
     0x0000: "PAT", 0x0001: "CAT", 0x0002: "TSDT", 0x0010: "NIT",
     0x0011: "SDT/BAT", 0x0012: "EIT", 0x0013: "RST", 0x0014: "TDT/TOT",
     0x0016: "网 (RNT)", 0x0017: "DCT", 0x001E: "DIT", 0x001F: "SIT",
-    0x0020: "SDTT (одноsegment)", 0x0023: "SDTT", 0x0024: "BIT",
-    0x0025: "NBIT/LDT", 0x0026: "EIT (H-EIT)", 0x0027: "EIT (одноsegment)",
-    0x0029: "CDT", 0x1FFF: "NULL (заполнение)",
+    0x0020: "SDTT (one segment)", 0x0023: "SDTT", 0x0024: "BIT",
+    0x0025: "NBIT/LDT", 0x0026: "EIT (H-EIT)", 0x0027: "EIT (one segment)",
+    0x0029: "CDT", 0x1FFF: "NULL (stuffing)",
 }
 
 
 # ---------------------------------------------------------------------------
-# Сборка секций из TS-пакетов
+# Reassembling sections from TS packets
 # ---------------------------------------------------------------------------
 
 
@@ -409,7 +409,7 @@ class SectionAssembler:
 
 
 # ---------------------------------------------------------------------------
-# Дескрипторы
+# Descriptors
 # ---------------------------------------------------------------------------
 
 
@@ -425,7 +425,7 @@ def parse_descriptors(data, charset="auto"):
              "len": length, "raw": body.hex()}
         try:
             _parse_one(d, tag, body, charset)
-        except Exception as exc:  # дескриптор битый — не роняем разбор
+        except Exception as exc:  # a broken descriptor must not kill the parse
             d["error"] = "%s: %s" % (type(exc).__name__, exc)
         res.append(d)
         i += 2 + length
@@ -435,6 +435,16 @@ def parse_descriptors(data, charset="auto"):
 def _parse_one(d, tag, b, charset):
     if tag == 0x05:
         d["format_identifier"] = b[:4].decode("ascii", "replace")
+        if d["format_identifier"] == "MTRM" and len(b) >= 6:
+            # Victor decks write version 0x10 (1.0) followed by reserved ones;
+            # a Hitachi DT-DR20000 writes version 0x07 followed by a country code
+            d["MTRM_version"] = "0x%02X" % b[5]
+            tail = bytes(b[6:])
+            cc = tail[:3]
+            if all(0x41 <= c <= 0x5A for c in cc):
+                d["MTRM_country"] = cc.decode("ascii")
+        elif len(b) > 4:
+            d["additional_info"] = bytes(b[4:]).hex()
     elif tag == 0x09:
         d["ca_system_id"] = (b[0] << 8) | b[1]
         d["ca_pid"] = ((b[2] & 0x1F) << 8) | b[3]
@@ -590,8 +600,8 @@ def _parse_one(d, tag, b, charset):
         d["retention_mode"] = (b[0] >> 4) & 1
         d["retention_state"] = (b[0] >> 1) & 7
         d["encryption_mode"] = b[0] & 1
-        d["encryption_str"] = ("шифрование не требуется" if b[0] & 1
-                               else "требуется шифрование при выводе")
+        d["encryption_str"] = ("no encryption required" if b[0] & 1
+                               else "encryption required on output")
     elif tag == 0xFA:
         d["area_code"] = (b[0] << 4) | (b[1] >> 4)
         d["guard_interval"] = (b[1] >> 2) & 3
@@ -622,7 +632,7 @@ def _parse_one(d, tag, b, charset):
 
 
 def _parse_caption_component_info(b):
-    """additional_arib_caption_info (ARIB STD-B24). Сырые байты тоже сохранены."""
+    """additional_arib_caption_info (ARIB STD-B24). The raw bytes are kept too."""
     out = {}
     if not b:
         return out
@@ -648,12 +658,12 @@ def _parse_caption_component_info(b):
             langs.append(entry)
         out["caption_languages"] = langs
     except Exception:
-        out["caption_languages_note"] = "не разобрано, см. additional_info"
+        out["caption_languages_note"] = "not parsed, see additional_info"
     return out
 
 
 # ---------------------------------------------------------------------------
-# Время
+# Time
 # ---------------------------------------------------------------------------
 
 
@@ -681,7 +691,7 @@ def bcd_duration(b):
 
 
 # ---------------------------------------------------------------------------
-# Анализатор
+# Analyser
 # ---------------------------------------------------------------------------
 
 BASE_PSI_PIDS = {0x0000, 0x0001, 0x0010, 0x0011, 0x0012, 0x0013, 0x0014,
@@ -690,7 +700,7 @@ BASE_PSI_PIDS = {0x0000, 0x0001, 0x0010, 0x0011, 0x0012, 0x0013, 0x0014,
 
 
 # ---------------------------------------------------------------------------
-# Разбор звуковых элементарных потоков и проверка их по IEC 60774-5 (D-VHS)
+# Parsing audio elementary streams and checking them against IEC 60774-5 (D-VHS)
 # ---------------------------------------------------------------------------
 
 _REV8 = [int("{:08b}".format(i)[::-1], 2) for i in range(256)]
@@ -705,7 +715,7 @@ MPA_BR = {
 AAC_RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000]
 AC3_BR = [32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 576, 640]
 AC3_ACMOD_CH = [2, 1, 2, 3, 3, 4, 4, 5]
-AC3_ACMOD_STR = ["1+1", "1/0 моно", "2/0 стерео", "3/0", "2/1", "3/1", "2/2", "3/2"]
+AC3_ACMOD_STR = ["1+1", "1/0 mono", "2/0 stereo", "3/0", "2/1", "3/1", "2/2", "3/2"]
 
 
 def probe_aac(es):
@@ -727,13 +737,13 @@ def probe_aac(es):
                 continue
             sf = (h[2] >> 2) & 0xF
             ch = ((h[2] & 1) << 2) | (h[3] >> 6)
-            return {"кодек": "AAC", "версия": "MPEG-2" if (h[1] >> 3) & 1 else "MPEG-4",
-                    "профиль": ["Main", "LC", "SSR", "LTP"][(h[2] >> 6) & 3],
-                    "частота": AAC_RATES[sf] if sf < len(AAC_RATES) else 0, "каналов": ch,
+            return {"codec": "AAC", "version": "MPEG-2" if (h[1] >> 3) & 1 else "MPEG-4",
+                    "profile": ["Main", "LC", "SSR", "LTP"][(h[2] >> 6) & 3],
+                    "rate": AAC_RATES[sf] if sf < len(AAC_RATES) else 0, "channels": ch,
                     "CRC": not (h[1] & 1), "adts_buffer_fullness": ((h[5] & 0x1F) << 6) | (h[6] >> 2),
                     "raw_data_blocks": (h[6] & 3) + 1,
-                    "кбит/с": round(n * 8 * (AAC_RATES[sf] if sf < len(AAC_RATES) else 48000) / 1024 / 1000),
-                    "кадров": frames}
+                    "kbit/s": round(n * 8 * (AAC_RATES[sf] if sf < len(AAC_RATES) else 48000) / 1024 / 1000),
+                    "frames": frames}
         i = es.find(b"\xff", i + 1)
     return None
 
@@ -751,10 +761,10 @@ def probe_mpa(es):
             if tab:
                 kbps = tab[br_i]
                 spf = 384 if layer == 1 else (1152 if (mpeg1 or layer == 2) else 576)
-                return {"кодек": "MPEG Audio", "версия": "MPEG-1" if mpeg1 else "MPEG-2",
-                        "слой": "I II III".split()[layer - 1], "частота": rate, "кбит/с": kbps,
-                        "каналов": 1 if (es[i + 3] >> 6) == 3 else 2, "CRC": not (b1 & 1),
-                        "отсч./кадр": spf}
+                return {"codec": "MPEG Audio", "version": "MPEG-1" if mpeg1 else "MPEG-2",
+                        "layer": "I II III".split()[layer - 1], "rate": rate, "kbit/s": kbps,
+                        "channels": 1 if (es[i + 3] >> 6) == 3 else 2, "CRC": not (b1 & 1),
+                        "samples/frame": spf}
         i = es.find(b"\xff", i + 1)
     return None
 
@@ -773,17 +783,43 @@ def probe_ac3(es):
             if acmod == 2:
                 bit += 2
             lfe = (es[bit // 8] >> (7 - bit % 8)) & 1 if bit // 8 < len(es) else 0
-            return {"кодек": "AC-3", "частота": {0: 48000, 1: 44100, 2: 32000}[fscod],
-                    "кбит/с": AC3_BR[frm >> 1], "режим": AC3_ACMOD_STR[acmod],
-                    "LFE": bool(lfe), "каналов": AC3_ACMOD_CH[acmod] + lfe,
+            return {"codec": "AC-3", "rate": {0: 48000, 1: 44100, 2: 32000}[fscod],
+                    "kbit/s": AC3_BR[frm >> 1], "mode": AC3_ACMOD_STR[acmod],
+                    "LFE": bool(lfe), "channels": AC3_ACMOD_CH[acmod] + lfe,
                     "bsid": es[i + 5] >> 3}
         i = es.find(b"\x0b\x77", i + 1)
     return None
 
 
+DTS_RATES = [32, 56, 64, 96, 112, 128, 192, 224, 256, 320, 384, 448, 512, 576, 640, 768,
+             960, 1024, 1152, 1280, 1344, 1408, 1411, 1472, 1510, 1920, 2048, 3072, 3840]
+DTS_SFREQ = [0, 8000, 16000, 32000, 0, 0, 11025, 22050, 44100, 0, 0, 12000, 24000, 48000]
+DTS_AMODE = {0: "1/0 mono", 1: "1+1", 2: "2/0 stereo", 3: "2/0 (L+R)", 4: "2/0 (LT/RT)",
+             5: "3/0", 6: "2/1", 7: "3/1", 8: "2/2", 9: "3/2"}
+DTS_AMODE_CH = {0: 1, 1: 2, 2: 2, 3: 2, 4: 2, 5: 3, 6: 3, 7: 4, 8: 4, 9: 5}
+
+
+def probe_dts(es):
+    i = es.find(b"\x7f\xfe\x80\x01")
+    while 0 <= i < len(es) - 14:
+        bits = int.from_bytes(es[i + 4:i + 12], "big")
+        get = lambda hi, n: (bits >> (64 - hi - n)) & ((1 << n) - 1)
+        sfreq = get(34, 4)
+        if sfreq < len(DTS_SFREQ) and DTS_SFREQ[sfreq]:
+            amode, rate, lff = get(28, 6), get(38, 5), get(53, 2)
+            return {"codec": "DTS Coherent Acoustics", "rate": DTS_SFREQ[sfreq],
+                    "kbit/s": DTS_RATES[rate] if rate < len(DTS_RATES) else 0,
+                    "mode": DTS_AMODE.get(amode, "?"), "LFE": lff in (1, 2),
+                    "channels": DTS_AMODE_CH.get(amode, 2) + (1 if lff in (1, 2) else 0),
+                    "samples/frame": (get(7, 7) + 1) * 32,
+                    "frame size": get(14, 14) + 1, "CRC": bool(get(6, 1))}
+        i = es.find(b"\x7f\xfe\x80\x01", i + 1)
+    return None
+
+
 def probe_pcm(es):
-    """SMPTE 302M. Порядок бит в 20-битном поле определяем по данным: у D-VHS
-    служебные биты идут первыми, у ffmpeg — последними."""
+    """SMPTE 302M. The bit order inside the 20-bit field is worked out from the
+    data: D-VHS puts the status bits first, ffmpeg puts them last."""
     if len(es) < 64:
         return None
     size = (es[0] << 8) | es[1]
@@ -811,13 +847,13 @@ def probe_pcm(es):
         return acc / max(1, n) / (rms + 1e-9)
     a, b = smooth(True), smooth(False)
     if max(a, b) < 0.02 or abs(a - b) < 0.05:
-        order = "не определить (сигнал слишком тихий или ровный)"
+        order = "cannot tell (the signal is too quiet or too flat)"
     else:
         order = "D-VHS" if a < b else "ffmpeg"
-    return {"кодек": "Linear PCM (SMPTE 302M)", "частота": 48000,
-            "каналов": [2, 4, 6, 8][nch], "бит": [16, 20, 24, 0][bps],
-            "размер кадра": size, "порядок бит": order,
-            "оценка гладкости": "%.2f / %.2f" % (a, b)}
+    return {"codec": "Linear PCM (SMPTE 302M)", "rate": 48000,
+            "channels": [2, 4, 6, 8][nch], "bits": [16, 20, 24, 0][bps],
+            "frame size": size, "bit order": order,
+            "smoothness": "%.2f / %.2f" % (a, b)}
 
 
 def probe_audio(stype, es):
@@ -827,45 +863,54 @@ def probe_audio(stype, es):
         return probe_mpa(es)
     if stype == 0x81:
         return probe_ac3(es)
+    if stype == 0x82:
+        return probe_dts(es)
     if stype == 0x83:
         return probe_pcm(es)
     return None
 
 
 def check_dvhs_audio(stype, info):
-    """Требования IEC 60774-5, приложение A.2.8."""
+    """The requirements of IEC 60774-5, annex A.2.8."""
     out = []
     if not info:
-        return ["не удалось разобрать поток"]
-    rate = info.get("частота")
+        return ["could not parse the stream"]
+    rate = info.get("rate")
     if stype in (0x0F, 0x11):
         if rate not in (32000, 44100, 48000):
-            out.append("частота %s — допустимы 32, 44,1 и 48 кГц" % rate)
-        if info.get("профиль") != "LC":
-            out.append("профиль %s — требуется LC" % info.get("профиль"))
+            out.append("rate %s -- 32, 44.1 and 48 kHz are allowed" % rate)
+        if info.get("profile") != "LC":
+            out.append("profile %s -- LC is required" % info.get("profile"))
         if not info.get("CRC"):
-            out.append("нет CRC в ADTS, стандарт его требует")
+            out.append("no CRC in the ADTS, the standard requires one")
         if info.get("adts_buffer_fullness") == 0x7FF:
-            out.append("adts_buffer_fullness = 0x7FF (VBR) — стандарт запрещает")
+            out.append("adts_buffer_fullness = 0x7FF (VBR) -- forbidden by the standard")
         if info.get("raw_data_blocks") != 1:
-            out.append("raw_data_block на кадр: %d, требуется 1" % info.get("raw_data_blocks"))
-        if info.get("каналов") and info.get("кбит/с", 0) > 288 * info["каналов"]:
-            out.append("%d кбит/с — больше 288 на канал" % info["кбит/с"])
+            out.append("raw_data_block per frame: %d, 1 is required" % info.get("raw_data_blocks"))
+        if info.get("channels") and info.get("kbit/s", 0) > 288 * info["channels"]:
+            out.append("%d kbit/s -- above 288 per channel" % info["kbit/s"])
     elif stype in (0x03, 0x04):
-        if info.get("слой") != "II":
-            out.append("слой %s — D-VHS описывает Layer II" % info.get("слой"))
+        if info.get("layer") != "II":
+            out.append("layer %s -- D-VHS describes Layer II" % info.get("layer"))
         if not info.get("CRC"):
-            out.append("нет CRC, стандарт его требует")
+            out.append("no CRC, the standard requires one")
     elif stype == 0x81:
         if rate != 48000:
-            out.append("частота %s — для AC-3 требуется 48 кГц" % rate)
-        if info.get("кбит/с", 0) > 640:
-            out.append("%d кбит/с — выше предела 640" % info["кбит/с"])
-        if info.get("режим") == "1+1":
-            out.append("режим 1+1 стандартом запрещён")
+            out.append("rate %s -- AC-3 requires 48 kHz" % rate)
+        if info.get("kbit/s", 0) > 640:
+            out.append("%d kbit/s -- above the 640 limit" % info["kbit/s"])
+        if info.get("mode") == "1+1":
+            out.append("mode 1+1 is forbidden by the standard")
+    elif stype == 0x82:
+        if rate != 48000:
+            out.append("rate %s -- DTS requires 48 kHz" % rate)
+        if not 188 <= info.get("kbit/s", 0) <= 1510:
+            out.append("%s kbit/s is outside the 188.25-1509.75 range" % info.get("kbit/s"))
+        if info.get("samples/frame") != 512:
+            out.append("frame of %s samples, 512 required" % info.get("samples/frame"))
     elif stype == 0x83:
-        if info.get("каналов") != 2 or info.get("бит") != 16:
-            out.append("D-VHS требует ровно 2 канала по 16 бит")
+        if info.get("channels") != 2 or info.get("bits") != 16:
+            out.append("D-VHS requires exactly 2 channels of 16 bits")
     return out
 
 
@@ -906,22 +951,23 @@ class TSAnalyzer:
         self.packets = 0
 
         self.pids = {}
-        self.es_bytes = {}          # pid -> начало элементарного потока
-        self.pts_lead = {}          # pid -> [мин, макс] PTS-PCR, секунды
-        self.run_max = {}           # pid -> самая длинная пачка подряд
+        self.es_bytes = {}          # pid -> start of the elementary stream
+        self.pts_lead = {}          # pid -> [min, max] PTS-PCR, seconds
+        self.run_max = {}           # pid -> longest run of consecutive packets
         self._run_pid = None
         self._run_len = 0
-        self._pcr_pkt = {}          # pid -> (номер пакета, PCR) предыдущей метки
-        self.peak_rate = {}         # pid -> (Мбит/с, секунда) самого быстрого участка
-        self.pcr_gap = {}           # pid -> самый долгий интервал между PCR
+        self._pcr_pkt = {}          # pid -> (packet number, PCR) at the window start
+        self._pcr_prev = {}         # pid -> the previous PCR, for the interval
+        self.peak_rate = {}         # pid -> (Mbit/s, second) of the fastest stretch
+        self.pcr_gap = {}           # pid -> longest interval between PCRs
         self.assemblers = {}
         self.psi_pids = set(BASE_PSI_PIDS)
-        self.es_pids = set()        # PID элементарных потоков — секциями не разбираем
+        self.es_pids = set()        # elementary stream PIDs: never parsed as sections
         self.pmt_pids = {}          # pid -> program_number
         self.carousel_pids = set()
         self.caption_pids = {}      # pid -> "caption"/"superimpose"
-        self.caption_sig = set()    # PID, объявленные субтитровыми в PMT
-        self.audio_sig = set()      # PID звука — их PES трогать нельзя
+        self.caption_sig = set()    # PIDs declared as captions in the PMT
+        self.audio_sig = set()      # audio PIDs: their PES must not be touched
 
         self.pat = OrderedDict()
         self.cat_descs = []
@@ -944,7 +990,7 @@ class TSAnalyzer:
         self.emergency = []
         self._event_keys = set()
 
-    # -- определение упаковки -------------------------------------------------
+    # -- container detection --------------------------------------------------
 
     def detect_packing(self):
         with open(self.path, "rb") as f:
@@ -966,11 +1012,11 @@ class TSAnalyzer:
             if best and best[0] >= 200 and best[1] == size:
                 break
         if not best:
-            raise SystemExit("Не найден синхробайт 0x47 — это не TS?")
+            raise SystemExit("No 0x47 sync byte found -- is this really TS?")
         _, self.pkt_size, self.head_len, self.offset = best
         return best
 
-    # -- основной проход ------------------------------------------------------
+    # -- main pass --------------------------------------------------------------
 
     def run(self):
         self.detect_packing()
@@ -1055,23 +1101,33 @@ class TSAnalyzer:
                 st.pcr_last = (pcr, self.packets)
                 st.pcr_count += 1
                 prev = self._pcr_pkt.get(pid)
-                if prev is not None:
+                last = self._pcr_prev.get(pid)
+                if last is not None:
+                    gap = (pcr - last) / 27e6
+                    if gap > self.pcr_gap.get(pid, 0.0):
+                        self.pcr_gap[pid] = gap
+                self._pcr_prev[pid] = pcr
+                if prev is None:
+                    self._pcr_pkt[pid] = (self.packets, pcr)
+                else:
                     n0, t0 = prev
-                    dt = (pcr - t0) / 27e6                  # PCR здесь в единицах 27 МГц
-                    if 0 < dt <= 10:
-                        rate = (self.packets - n0) * 188 * 8 / dt / 1e6
-                        cur = self.peak_rate.get(pid, (0.0, 0.0))
-                        if rate > cur[0]:
-                            self.peak_rate[pid] = (rate, (t0 - st.pcr_first[0]) / 27e6)
-                        if dt > self.pcr_gap.get(pid, 0.0):
-                            self.pcr_gap[pid] = dt
-                self._pcr_pkt[pid] = (self.packets, pcr)
+                    dt = (pcr - t0) / 27e6              # PCR here is in 27 MHz units
+                    # A rate measured over a very short window is meaningless: a real
+                    # D-Theater tape spaces its PCR 0.1 ms apart and would "peak" at
+                    # 40 Mbit/s. Grow the window until it is worth measuring.
+                    if dt >= 0.005:
+                        if dt <= 10:
+                            rate = (self.packets - n0) * 188 * 8 / dt / 1e6
+                            cur = self.peak_rate.get(pid, (0.0, 0.0))
+                            if rate > cur[0]:
+                                self.peak_rate[pid] = (rate, (t0 - st.pcr_first[0]) / 27e6)
+                        self._pcr_pkt[pid] = (self.packets, pcr)
             if afc == 3:
                 payload = p[5 + af_len:]
         elif afc == 1:
             payload = p[4:]
 
-        # continuity_counter: инкремент только при наличии payload
+        # continuity_counter: it only increments when there is a payload
         if afc in (1, 3):
             if st.last_cc is not None:
                 if cc != (st.last_cc + 1) & 0x0F:
@@ -1088,7 +1144,7 @@ class TSAnalyzer:
             buf = self.es_bytes.get(pid)
             if pusi and payload[:3] == b"\x00\x00\x01" and len(payload) > 8:
                 if buf is None:
-                    buf = self.es_bytes[pid] = bytearray()   # начинаем строго с начала PES
+                    buf = self.es_bytes[pid] = bytearray()   # start exactly at a PES boundary
                 if len(buf) < 96 * 1024:
                     buf += payload[9 + payload[8]:]
             elif buf is not None and len(buf) < 96 * 1024:
@@ -1115,8 +1171,8 @@ class TSAnalyzer:
         body = payload[9 + hdr_len:]
         if st.pes_sample is None:
             st.pes_sample = body[:24].hex()
-        # AC-3, DTS и линейный PCM тоже идут через stream_id 0xBD, а их куски
-        # могут случайно начинаться с 0x80/0x81 — опираемся на сигнализацию в PMT
+        # AC-3, DTS and linear PCM also travel with stream_id 0xBD, and their
+        # chunks may start with 0x80/0x81 by chance -- trust the PMT signalling
         if sid == 0xBD and body and body[0] in (0x80, 0x81) and st.pid not in self.audio_sig \
                 and (st.pid in self.caption_sig or not self.caption_sig):
             self._caption_pes(st.pid, body)
@@ -1139,10 +1195,10 @@ class TSAnalyzer:
                     if info:
                         self.caption_mgmt[pid] = info
             else:
-                # data_group_id 1..8 — это 字幕1..字幕8 (группа A), 0x21.. — группа B
+                # data_group_id 1..8 are caption 1..8 (group A), 0x21.. are group B
                 lang_no = (gid - 0x21 if gid >= 0x21 else gid - 1) + 1
                 self.caption_groups["statement(0x%02X) = 字幕%d%s" %
-                                    (gid, lang_no, " группа B" if gid >= 0x21 else "")] += 1
+                                    (gid, lang_no, " group B" if gid >= 0x21 else "")] += 1
         except Exception:
             pass
 
@@ -1153,7 +1209,7 @@ class TSAnalyzer:
         tmd = b[0] >> 6
         i = 1
         if tmd == 0b10:
-            return {"TMD": tmd, "note": "TMD=offset time, языки не разобраны"}
+            return {"TMD": tmd, "note": "TMD=offset time, languages not parsed"}
         n = b[i]
         i += 1
         langs = []
@@ -1175,12 +1231,12 @@ class TSAnalyzer:
             langs.append(e)
         return {"TMD": tmd, "languages": langs}
 
-    # -- секции ---------------------------------------------------------------
+    # -- sections ---------------------------------------------------------------
 
     def _section(self, pid, sec):
-        # В D-VHS и D-Theater PMT лежит на низких PID (0x0010), а элементарные
-        # потоки — на 0x0011 и далее. Поэтому принадлежность к программе важнее
-        # привычных номеров PID: иначе PMT разбирается как NIT, а видео — как SI.
+        # In D-VHS and D-Theater the PMT sits on a low PID (0x0010) and the
+        # elementary streams on 0x0011 and up. Programme membership therefore
+        # outranks the usual PID numbers: otherwise the PMT parses as a NIT and
         if pid in self.es_pids:
             return
         tid = sec[0]
@@ -1198,7 +1254,7 @@ class TSAnalyzer:
             elif tid == 0x02 and pid in self.pmt_pids:
                 self._pmt(pid, sec)
             elif pid in self.pmt_pids:
-                return                        # чужие таблицы на PID программы игнорируем
+                return                        # foreign tables on a programme PID are ignored
             elif tid in (0x42, 0x46):
                 self._sdt(sec)
             elif tid in (0x40, 0x41):
@@ -1391,7 +1447,7 @@ class TSAnalyzer:
         except Exception:
             pass
 
-    # -- сводка ---------------------------------------------------------------
+    # -- summary ----------------------------------------------------------------
 
     def bitrate(self):
         best = None
@@ -1421,27 +1477,27 @@ class TSAnalyzer:
                 if d["tag"] == 0xFD and d.get("data_component_id") == 0x0008:
                     if ctag is not None and 0x38 <= ctag <= 0x3F:
                         return "文字スーパー / superimpose (ARIB)"
-                    return "субтитры ARIB STD-B24"
+                    return "ARIB STD-B24 captions"
                 if d["tag"] == 0x59:
-                    return "субтитры DVB"
+                    return "DVB subtitles"
                 if d["tag"] == 0x56:
-                    return "телетекст"
+                    return "teletext"
                 if d["tag"] == 0xFD:
-                    return "данные (%s)" % d.get("data_component_str", "?")
+                    return "data (%s)" % d.get("data_component_str", "?")
             if ctag is not None and 0x30 <= ctag <= 0x37:
-                return "субтитры ARIB (по component_tag)"
+                return "ARIB captions (by component_tag)"
             if ctag is not None and 0x38 <= ctag <= 0x3F:
-                return "文字スーパー / superimpose (по component_tag)"
-            return "приватные данные"
+                return "superimpose (by component_tag)"
+            return "private data"
         if stype in (0x0B, 0x0D, 0x08, 0x0A, 0x0C):
-            return "карусель данных / DSM-CC"
+            return "data carousel / DSM-CC"
         if stype in (0x01, 0x02, 0x10, 0x1B, 0x24, 0x80):
-            return "видео"
+            return "video"
         if stype in (0x03, 0x04, 0x0F, 0x11, 0x81, 0x82, 0x83, 0x87):
-            return "аудио"
+            return "audio"
         if 0x09 in tags:
-            return "условный доступ"
-        return "прочее"
+            return "conditional access"
+        return "other"
 
     def to_dict(self):
         br = self.bitrate()
@@ -1481,7 +1537,7 @@ class TSAnalyzer:
 
 
 # ---------------------------------------------------------------------------
-# Отчёт
+# Report
 # ---------------------------------------------------------------------------
 
 
@@ -1490,11 +1546,11 @@ def h(title):
 
 
 def fmt_size(n):
-    for u in ("Б", "КиБ", "МиБ", "ГиБ"):
+    for u in ("B", "KiB", "MiB", "GiB"):
         if n < 1024:
             return "%.1f %s" % (n, u)
         n /= 1024.0
-    return "%.1f ТиБ" % n
+    return "%.1f TiB" % n
 
 
 def report(a):
@@ -1502,89 +1558,89 @@ def report(a):
     p = o.append
     size = os.path.getsize(a.path)
 
-    p(h("1. КОНТЕЙНЕР"))
-    p("Файл:            %s (%s)" % (a.path, fmt_size(size)))
-    p("Размер пакета:   %d байт (%s)" % (
+    p(h("1. CONTAINER"))
+    p("File:            %s (%s)" % (a.path, fmt_size(size)))
+    p("Packet size:     %d bytes (%s)" % (
         a.pkt_size,
-        {188: "чистый TS", 192: "source packet, 4-байтовый заголовок (i.LINK/M2TS)",
-         204: "TS + 16 байт Reed-Solomon",
-         208: "4 + 188 + 16"}.get(a.pkt_size, "нестандартно")))
-    p("Смещение синхр.: %d байт" % a.offset)
-    p("Пакетов:         %d" % a.packets)
+        {188: "plain TS", 192: "source packet, 4-byte header (i.LINK/M2TS)",
+         204: "TS plus 16 bytes of Reed-Solomon",
+         208: "4 + 188 + 16"}.get(a.pkt_size, "non-standard")))
+    p("Sync offset:     %d bytes" % a.offset)
+    p("Packets:         %d" % a.packets)
     if a.head_len:
-        p("Заголовки источниковых пакетов:")
-        p("  первый: 0x%08X   последний: 0x%08X" % (a.src_ts_first or 0,
+        p("Source packet headers:")
+        p("  first: 0x%08X   last: 0x%08X" % (a.src_ts_first or 0,
                                                     a.src_ts_last or 0))
-        p("  старшие 2 бита (CPI/copy permission у M2TS): " +
+        p("  top 2 bits (CPI / copy permission in M2TS): " +
           ", ".join("0b%s×%d" % (format(k, "02b"), v)
                     for k, v in sorted(a.src_cpi.items())))
-        p("  ! DTCP-статус линка i.LINK (EMI) в TS не хранится — он живёт")
-        p("    в CIP-заголовке изохронных пакетов 1394 и здесь не виден.")
+        p("  ! the DTCP link status (EMI) of i.LINK is not stored in the TS -- it lives")
+        p("    in the CIP header of the 1394 isochronous packets and is invisible here.")
     br = a.bitrate()
     if br:
-        p("PCR PID:         0x%04X (%d меток)" % (br["pcr_pid"], br["pcr_count"]))
-        p("Длительность:    %.2f c (%02d:%02d:%05.2f)" % (
+        p("PCR PID:         0x%04X (%d stamps)" % (br["pcr_pid"], br["pcr_count"]))
+        p("Duration:        %.2f s (%02d:%02d:%05.2f)" % (
             br["duration_s"], int(br["duration_s"] // 3600),
             int(br["duration_s"] % 3600 // 60), br["duration_s"] % 60))
-        p("Битрейт:         %.3f Мбит/с (по TS-полезной нагрузке)" %
+        p("Bit rate:        %.3f Mbit/s (over the TS payload)" %
           (br["bitrate_bps"] / 1e6))
     else:
-        p("PCR не найден — длительность и битрейт не вычислить.")
+        p("No PCR found -- duration and bit rate cannot be computed.")
 
-    p(h("2. ТАБЛИЦЫ PSI/SI"))
+    p(h("2. PSI/SI TABLES"))
     if a.table_counts:
         for k, v in sorted(a.table_counts.items()):
-            p("  %-28s секций: %d" % (k, v))
+            p("  %-28s sections: %d" % (k, v))
     else:
-        p("  таблиц не найдено")
-    p("Ошибок CRC: %d" % a.crc_errors)
+        p("  no tables found")
+    p("CRC errors: %d" % a.crc_errors)
 
-    p(h("3. PAT / ПРОГРАММЫ"))
+    p(h("3. PAT / PROGRAMMES"))
     for k, v in a.pat.items():
         p("  program %-6s -> PMT PID 0x%04X" % (k, v))
     for prog in a.programs.values():
         svc = a.services.get(prog["program_number"], {})
-        p("\n--- Программа %d (PMT 0x%04X, версия %d) ---" %
+        p("\n--- Programme %d (PMT 0x%04X, version %d) ---" %
           (prog["program_number"], prog["pmt_pid"], prog["version"]))
         if svc:
-            p("    Сервис: %s / %s [%s]" % (svc.get("name"), svc.get("provider"),
+            p("    Service: %s / %s [%s]" % (svc.get("name"), svc.get("provider"),
                                             svc.get("service_type")))
-            p("    free_CA_mode: %s" % ("да (открытый)" if not svc["free_CA_mode"]
-                                        else "нет (сервис под CA)"))
+            p("    free_CA_mode: %s" % ("yes (in the clear)" if not svc["free_CA_mode"]
+                                        else "no (the service is under CA)"))
         p("    PCR PID: 0x%04X" % prog["pcr_pid"])
         if prog["descriptors"]:
-            p("    Дескрипторы программы:")
+            p("    Programme descriptors:")
             for d in prog["descriptors"]:
                 p("      " + desc_line(d))
-        p("    Элементарные потоки:")
+        p("    Elementary streams:")
         for es in prog["es"]:
             st = a.pids.get(es["pid"])
             role = a.es_role(es["stream_type"], es["descriptors"])
             p("      PID 0x%04X  type 0x%02X %-26s %s" %
               (es["pid"], es["stream_type"], es["stream_type_str"], role))
             if st:
-                p("        пакетов: %d, PES: %d, скремблировано: %d, CC-ошибок: %d"
+                p("        packets: %d, PES: %d, scrambled: %d, CC errors: %d"
                   % (st.packets, st.pes_count, st.scrambled, st.cc_errors))
                 if st.pes_sample:
-                    p("        первые байты PES: %s" % st.pes_sample)
+                    p("        first PES bytes: %s" % st.pes_sample)
             for d in es["descriptors"]:
                 p("        " + desc_line(d))
 
-    p(h("4. СУБТИТРЫ"))
+    p(h("4. CAPTIONS"))
     found = []
     for prog in a.programs.values():
         for es in prog["es"]:
             role = a.es_role(es["stream_type"], es["descriptors"])
-            if "убтитр" in role or "superimpose" in role or "елетекст" in role:
+            if "caption" in role or "superimpose" in role or "teletext" in role:
                 found.append((prog["program_number"], es, role))
     if not found:
-        p("  В PMT субтитровые ES не объявлены.")
+        p("  No caption ES declared in the PMT.")
     for prognum, es, role in found:
         st = a.pids.get(es["pid"])
         ctag = next((d.get("component_tag") for d in es["descriptors"]
                      if d["tag"] == 0x52), None)
-        p("  программа %d, PID 0x%04X — %s" % (prognum, es["pid"], role))
-        p("    component_tag: %s" % ("0x%02X" % ctag if ctag is not None else "нет"))
+        p("  programme %d, PID 0x%04X -- %s" % (prognum, es["pid"], role))
+        p("    component_tag: %s" % ("0x%02X" % ctag if ctag is not None else "none"))
         for d in es["descriptors"]:
             if d["tag"] == 0xFD:
                 p("    data_component: %s (id 0x%04X)" %
@@ -1595,21 +1651,21 @@ def report(a):
                       (lang.get("lang"), lang.get("language_tag"), lang.get("DMF"),
                        lang.get("format"), lang.get("TCS"), lang.get("rollup_mode")))
         if st:
-            p("    трафик: %d TS-пакетов, %d PES-пакетов" % (st.packets, st.pes_count))
+            p("    traffic: %d TS packets, %d PES packets" % (st.packets, st.pes_count))
             if st.packets and not st.pes_count:
                 if st.scrambled:
-                    p("    ! PES не разобрать: пакеты скремблированы (%d шт.)" %
+                    p("    ! the PES cannot be parsed: the packets are scrambled (%d of them)" %
                       st.scrambled)
                 else:
-                    p("    ! PID объявлен, но PES-пакеты не найдены — поток пустой")
+                    p("    ! the PID is declared but no PES packets were found -- the stream is empty")
             if not st.packets:
-                p("    ! PID объявлен в PMT, но трафика по нему нет вообще")
+                p("    ! the PID is declared in the PMT but carries no traffic at all")
     if a.caption_groups:
-        p("\n  Реально принятые data group (из PES):")
+        p("\n  Data groups actually received (from the PES):")
         for k, v in sorted(a.caption_groups.items()):
             p("    %-22s %d" % (k, v))
     else:
-        p("\n  Data group субтитров в PES не обнаружено.")
+        p("\n  No caption data groups found in the PES.")
     for pid, mg in a.caption_mgmt.items():
         p("  caption management data, PID 0x%04X: TMD=%s" % (pid, mg.get("TMD")))
         for lang in mg.get("languages", []):
@@ -1617,20 +1673,20 @@ def report(a):
               (lang.get("lang"), lang.get("language_tag"), lang.get("DMF"),
                lang.get("format"), lang.get("TCS"), lang.get("rollup_mode")))
 
-    p(h("5. КАРУСЕЛИ ДАННЫХ / DSM-CC"))
+    p(h("5. DATA CAROUSELS / DSM-CC"))
     if not a.dsmcc:
-        p("  DSM-CC секций не найдено.")
+        p("  No DSM-CC sections found.")
     for k, v in sorted(a.dsmcc.items()):
-        p("  %s: %d секций" % (k, v))
+        p("  %s: %d sections" % (k, v))
     for c in a.carousels.values():
         p("  PID 0x%04X:" % c["pid"])
         for txid, tx in c["transactions"].items():
             if tx["type"] == "DII":
-                p("    DII transaction %s, download_id %s, block %d Б, модулей %d, "
-                  "суммарно %s" % (txid, tx["download_id"], tx["block_size"],
+                p("    DII transaction %s, download_id %s, block %d B, modules %d, "
+                  "total %s" % (txid, tx["download_id"], tx["block_size"],
                                    tx["modules"], fmt_size(tx["total_bytes"])))
                 for m in tx["module_list"]:
-                    p("      module 0x%04X  %8d Б  v%d" %
+                    p("      module 0x%04X  %8d B  v%d" %
                       (m["module_id"], m["size"], m["version"]))
             else:
                 p("    DSI transaction %s" % txid)
@@ -1638,29 +1694,29 @@ def report(a):
         for es in prog["es"]:
             for d in es["descriptors"]:
                 if d["tag"] == 0x13:
-                    p("  carousel_identifier на PID 0x%04X: id=%d" %
+                    p("  carousel_identifier on PID 0x%04X: id=%d" %
                       (es["pid"], d.get("carousel_id")))
                 if d["tag"] == 0x14:
-                    p("  association_tag на PID 0x%04X: 0x%04X" %
+                    p("  association_tag on PID 0x%04X: 0x%04X" %
                       (es["pid"], d.get("association_tag", 0)))
 
-    p(h("6. УПРАВЛЕНИЕ КОПИРОВАНИЕМ И ЗАЩИТА"))
+    p(h("6. COPY CONTROL AND PROTECTION"))
     any_cc = False
     for prog in a.programs.values():
         for d in prog["descriptors"]:
             if d["tag"] == 0xC1:
                 any_cc = True
-                p("  [программа %d] digital_copy_control: %s, APS: %s" %
+                p("  [programme %d] digital_copy_control: %s, APS: %s" %
                   (prog["program_number"], d.get("copy_control_str"), d.get("APS_str")))
                 if "maximum_bitrate_kbps" in d:
-                    p("      максимальный битрейт: %d кбит/с" %
+                    p("      maximum bit rate: %d kbit/s" %
                       d["maximum_bitrate_kbps"])
                 for c in d.get("components", []):
                     p("      component_tag 0x%02X: %s" %
                       (c["component_tag"], c["copy_control_str"]))
             if d["tag"] == 0xDE:
                 any_cc = True
-                p("  [программа %d] content_availability: %s; "
+                p("  [programme %d] content_availability: %s; "
                   "copy_restriction_mode=%d, image_constraint_token=%d, "
                   "retention_mode=%d, retention_state=%d" %
                   (prog["program_number"], d.get("encryption_str"),
@@ -1679,7 +1735,7 @@ def report(a):
                                           d.get("ca_pid", 0)))
     for ev in a.events:
         if ev.get("copy_control"):
-            p("  [EIT, событие 0x%04X] digital_copy_control: %s" %
+            p("  [EIT, event 0x%04X] digital_copy_control: %s" %
               (ev["event_id"], ev["copy_control"]))
     if a.cat_descs:
         p("  CAT:")
@@ -1690,21 +1746,21 @@ def report(a):
             else:
                 p("    " + desc_line(d))
     if not any_cc and not a.cat_descs:
-        p("  Дескрипторов управления копированием и CA не найдено.")
+        p("  No copy-control or CA descriptors found.")
 
     scrambled = [s for s in a.pids.values() if s.scrambled]
-    p("\n  Скремблирование (transport_scrambling_control):")
+    p("\n  Scrambling (transport_scrambling_control):")
     if scrambled:
         for s in sorted(scrambled, key=lambda x: -x.scrambled):
-            p("    PID 0x%04X: %d из %d пакетов помечены как скремблированные" %
+            p("    PID 0x%04X: %d of %d packets marked as scrambled" %
               (s.pid, s.scrambled, s.packets))
-        p("    -> поток закрыт CA (B-CAS/CAS); ES не разобрать без дескремблирования.")
+        p("    -> the stream is under CA (B-CAS/CAS); the ES cannot be parsed without descrambling.")
     else:
-        p("    ни один пакет не помечен — поток открытый (или уже дескремблирован).")
+        p("    no packet is marked -- the stream is in the clear (or already descrambled).")
 
-    p(h("7. КАРТА PID"))
+    p(h("7. PID MAP"))
     p("  %-8s %10s %7s %8s %6s %8s  %s" %
-      ("PID", "пакетов", "доля", "скрембл", "CC-err", "PES", "назначение"))
+      ("PID", "packets", "share", "scrmbl", "CC-err", "PES", "role"))
     es_map = {}
     for prog in a.programs.values():
         es_map[prog["pcr_pid"]] = es_map.get(prog["pcr_pid"], "PCR")
@@ -1719,7 +1775,7 @@ def report(a):
           (s.pid, s.packets, 100.0 * s.packets / max(1, a.packets),
            s.scrambled, s.cc_errors, s.pes_count, role))
 
-    p(h("8. СЕТЬ / ВРЕМЯ / EPG"))
+    p(h("8. NETWORK / TIME / EPG"))
     if a.nit:
         p("  NIT: network_id %d (%s)" % (a.nit["network_id"], a.nit["table"]))
         for d in a.nit["descriptors"]:
@@ -1730,13 +1786,13 @@ def report(a):
             for d in ts["descriptors"]:
                 p("      " + desc_line(d))
     else:
-        p("  NIT не найдена.")
-    p("  TDT: %s" % (a.time_tdt or "нет"))
-    p("  TOT: %s" % (a.time_tot or "нет"))
+        p("  No NIT found.")
+    p("  TDT: %s" % (a.time_tdt or "none"))
+    p("  TOT: %s" % (a.time_tot or "none"))
     for d in a.tot_descs:
         p("    " + desc_line(d))
     if a.events:
-        p("\n  События EPG (%d, уникальные по event_id):" % len(a.events))
+        p("\n  EPG events (%d, unique by event_id):" % len(a.events))
         for e in a.events:
             p("    [%s] sid 0x%04X eid 0x%04X %s +%s  %s" %
               (e["table"], e["service_id"], e["event_id"], e["start"],
@@ -1744,15 +1800,15 @@ def report(a):
             if e["text"]:
                 p("        %s" % e["text"][:110])
     else:
-        p("\n  EIT не найдена.")
+        p("\n  No EIT found.")
     if a.emergency:
-        p("\n  !!! Обнаружен emergency_information_descriptor (緊急警報放送)")
+        p("\n  !!! An emergency_information_descriptor was found")
 
-    p(h("9. ЗВУК: ФОРМАТЫ И СООТВЕТСТВИЕ D-VHS"))
+    p(h("9. AUDIO: FORMATS AND D-VHS COMPLIANCE"))
     audio_found = False
     for prog in a.programs.values():
         for es in prog["es"]:
-            if a.es_role(es["stream_type"], es["descriptors"]) != "аудио":
+            if a.es_role(es["stream_type"], es["descriptors"]) != "audio":
                 continue
             audio_found = True
             ctag = next((d.get("component_tag") for d in es["descriptors"] if d["tag"] == 0x52), None)
@@ -1761,112 +1817,126 @@ def report(a):
             p("  PID 0x%04X  stream_type 0x%02X %s%s%s" % (
                 es["pid"], es["stream_type"], STREAM_TYPES.get(es["stream_type"], ""),
                 "  tag 0x%02X" % ctag if ctag is not None else "",
-                "  язык %s" % lang if lang else ""))
+                "  language %s" % lang if lang else ""))
             info = probe_audio(es["stream_type"], bytes(a.es_bytes.get(es["pid"], b"")))
             if info:
                 p("    " + ", ".join("%s=%s" % (k, v) for k, v in info.items()))
             else:
-                p("    поток не разобран (мало данных или чужой формат)")
+                p("    stream not parsed (too little data or a foreign format)")
             for msg in check_dvhs_audio(es["stream_type"], info):
                 p("    ! " + msg)
     if not audio_found:
-        p("  звуковых ES не найдено")
+        p("  no audio ES found")
 
-    p(h("10. ПРИГОДНОСТЬ ДЛЯ ЗАПИСИ НА D-VHS"))
+    p(h("10. FITNESS FOR RECORDING ONTO D-VHS"))
     pcr_pid = max(a.peak_rate, key=lambda k: a.pids[k].pcr_count) if a.peak_rate else None
     if pcr_pid is not None:
         peak, at = a.peak_rate[pcr_pid]
-        p("Пиковая мгновенная скорость: %.1f Мбит/с (на %.1f с, между соседними PCR)" % (peak, at))
-        for name, lim in (("HS", 28.2), ("STD", 14.1)):
-            p("  режим %-3s (%4.1f Мбит/с): %s" % (name, lim, "проходит" if peak <= lim else
-                                                   "ПРЕВЫШЕН — дека может запнуться"))
+        p("Peak instantaneous rate: %.3f Mbit/s (at %.1f s, between adjacent PCRs)" % (peak, at))
+        # k from Table 17: LS2..LS7 run the tape at 1/k of the STD speed
+        # Payload rates: the familiar 28.2 / 14.1 / 4.7 are gross channel rates
+        # that include the error-correction codes. A deck writes 87.9 % of that.
+        for name, lim in (("HS", 24.79), ("STD", 12.40), ("LS2", 6.20),
+                          ("LS3", 4.13), ("LS5", 2.48), ("LS7", 1.77)):
+            # 1 % of slack: the decks' own recordings sit right on their limit
+            p("  mode %-3s (%5.2f Mbit/s): %s" % (name, lim, "fits" if peak <= lim * 1.01 else
+                                                   "EXCEEDED -- artefacts or a stall"))
         gap = a.pcr_gap.get(pcr_pid, 0)
-        p("Самый долгий интервал между PCR: %.1f мс (предел ARIB 100)%s" % (
-            gap * 1000, "" if gap <= 0.1 else "  ! превышен"))
+        p("Longest interval between PCRs: %.1f ms (the ARIB limit is 100)%s" % (
+            gap * 1000, "" if gap <= 0.1 else "  ! exceeded"))
     else:
-        p("PCR не найден — оценить скорость нельзя")
+        p("No PCR found -- the rate cannot be judged")
     video_pids = {es["pid"] for prog in a.programs.values() for es in prog["es"]
-                  if a.es_role(es["stream_type"], es["descriptors"]) == "видео"}
+                  if a.es_role(es["stream_type"], es["descriptors"]) == "video"}
     bursts = sorted(((v, k) for k, v in a.run_max.items()
                      if v >= 16 and k != 0x1FFF and k not in video_pids), reverse=True)
     if bursts:
-        p("Длинные пачки пакетов одного PID — создают всплеск скорости:")
+        p("Long runs of one PID -- they create a rate spike:")
         for v, k in bursts[:6]:
-            p("  PID 0x%04X: %d подряд" % (k, v))
+            p("  PID 0x%04X: %d in a row" % (k, v))
     else:
         others = [v for k, v in a.run_max.items() if k != 0x1FFF and k not in video_pids]
-        p("Пачек нет: вне видео максимум %d пакетов подряд" % (max(others) if others else 0))
+        p("No bursts: outside video at most %d packets in a row" % (max(others) if others else 0))
     for k in sorted(video_pids):
         if a.run_max.get(k, 0) >= 16:
-            p("  (видео PID 0x%04X идёт по %d пакетов подряд — для видео это норма)"
+            p("  (video PID 0x%04X runs %d packets in a row -- normal for video)"
               % (k, a.run_max[k]))
     tabs = set(a.table_counts)
     has = lambda name: any(name in t for t in tabs)
-    p("SIT: %s, DIT: %s" % ("есть" if has("SIT") else "нет", "есть" if has("DIT") else "нет"))
+    p("SIT: %s, DIT: %s" % ("yes" if has("SIT") else "no", "yes" if has("DIT") else "no"))
     extra = [t for t in ("NIT", "SDT", "EIT", "TOT", "BIT") if has(t)]
-    p("Эфирные таблицы в потоке: %s" % (", ".join(extra) if extra else "нет"))
+    p("Broadcast tables present: %s" % (", ".join(extra) if extra else "none"))
     if has("SIT") and not extra:
-        p("  -> похоже на partial TS, как его отдаёт тюнер по i.LINK")
+        p("  -> looks like a partial TS, the way a tuner sends it over i.LINK")
     elif extra and not has("SIT"):
-        p("  -> похоже на полный эфирный поток, не partial TS")
+        p("  -> looks like a full broadcast stream, not a partial TS")
     mtrm = any(d.get("format_identifier") == "MTRM"
                for prog in a.programs.values() for d in prog["descriptors"] if d["tag"] == 0x05)
-    p("registration MTRM (флаг D-VHS-совместимости): %s" % ("есть" if mtrm else "нет"))
+    mtrm_d = [d for prog in a.programs.values() for d in prog["descriptors"]
+              if d["tag"] == 0x05 and d.get("format_identifier") == "MTRM"]
+    p("registration MTRM (the D-VHS compliance flag): %s" % (
+        ("yes, version %s%s" % (mtrm_d[0].get("MTRM_version"),
+                                 ", country %s" % mtrm_d[0]["MTRM_country"]
+                                 if mtrm_d[0].get("MTRM_country") else ""))
+        if mtrm_d else "no"))
+    pcr_pids = {prog.get("pcr_pid") for prog in a.programs.values()}
+    es_pids = {es["pid"] for prog in a.programs.values() for es in prog["es"]}
+    p("PCR: %s" % ("on its own PID" if pcr_pids - es_pids else "inside an elementary stream"))
     dtcp = [d for prog in a.programs.values() for d in prog["descriptors"] if d["tag"] == 0x88]
     if dtcp:
         d = dtcp[0]
         p("DTCP_descriptor: CCI=%s, EPN=%d, ICT=%d, APS=%s" % (
             d.get("DTCP_CCI_str"), d.get("EPN", 0), d.get("Image_Constraint_Token", 0), d.get("APS_str")))
     else:
-        p("DTCP_descriptor (0x88): нет")
+        p("DTCP_descriptor (0x88): none")
 
-    p(h("11. ЗАМЕЧАНИЯ"))
+    p(h("11. NOTES"))
     warn = []
     total_cc = sum(s.cc_errors for s in a.pids.values())
     if total_cc:
-        warn.append("Ошибок continuity_counter: %d (обрывы/потери пакетов)" % total_cc)
+        warn.append("continuity_counter errors: %d (drops or lost packets)" % total_cc)
     tei = sum(s.tei_errors for s in a.pids.values())
     if tei:
-        warn.append("transport_error_indicator взведён у %d пакетов" % tei)
+        warn.append("transport_error_indicator set on %d packets" % tei)
     if a.crc_errors:
-        warn.append("Секций с битым CRC: %d" % a.crc_errors)
+        warn.append("Sections with a bad CRC: %d" % a.crc_errors)
     null = a.pids.get(0x1FFF)
     if null:
-        warn.append("Нулевых пакетов (PID 0x1FFF): %d — %.1f%% потока" %
+        warn.append("Null packets (PID 0x1FFF): %d -- %.1f %% of the stream" %
                     (null.packets, 100.0 * null.packets / max(1, a.packets)))
     if not a.programs:
-        warn.append("PMT не разобрана — PAT не найдена или поток скремблирован")
+        warn.append("No PMT parsed -- either no PAT was found or the stream is scrambled")
     for prog in a.programs.values():
         tags = [d.get("component_tag") for es in prog["es"] for d in es["descriptors"]
                 if d["tag"] == 0x52]
         if len(tags) != len(set(tags)):
-            warn.append("Программа %d: повторяющиеся component_tag %s" %
+            warn.append("Programme %d: duplicate component_tag %s" %
                         (prog["program_number"], tags))
         if not any(d["tag"] == 0xC1 for d in prog["descriptors"]):
-            warn.append("Программа %d: нет digital_copy_control_descriptor "
-                        "(ARIC требует его в PMT для вещательного потока)" %
+            warn.append("Programme %d: no digital_copy_control_descriptor "
+                        "(ARIB requires one in the PMT of a broadcast stream)" %
                         prog["program_number"])
     if a.caption_pids and not a.caption_groups:
-        warn.append("Найдены PES с data_identifier 0x80/0x81, но data group не разобраны")
+        warn.append("PES with data_identifier 0x80/0x81 were found but no data group was parsed")
     if scrambled:
-        warn.append("Скремблировано PID'ов: %d — часть анализа недоступна без "
-                    "дескремблирования" % len(scrambled))
+        warn.append("Scrambled PIDs: %d -- part of the analysis is unavailable without "
+                    "descrambling" % len(scrambled))
     cap_es = [es for prog in a.programs.values() for es in prog["es"]
-              if "убтитр" in a.es_role(es["stream_type"], es["descriptors"])]
+              if "caption" in a.es_role(es["stream_type"], es["descriptors"])]
     if cap_es and not a.caption_groups and not scrambled:
-        warn.append("Субтитровый ES объявлен, но ни одной caption data group "
-                    "не принято — проверьте PES (data_identifier 0x80) и PTS")
+        warn.append("A caption ES is declared but not a single caption data group "
+                    "was received -- check the PES (data_identifier 0x80) and the PTS")
     if not warn:
-        p("  Ничего подозрительного.")
+        p("  Nothing suspicious.")
     for w in warn:
         p("  * " + w)
     return "\n".join(o)
 
 
 def signature(a):
-    """Детерминированный дамп сигнализации без счётчиков трафика.
+    """A deterministic dump of the signalling without traffic counters.
 
-    Годится для сравнения эталонного вещательного потока со своим муксом:
+    Handy for diffing a reference broadcast stream against your own mux:
         diff <(tsinfo.py --sig ref.ts) <(tsinfo.py --sig mine.ts)
     """
     o = []
@@ -1935,22 +2005,22 @@ def desc_line(d):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Инвентаризация вещательного TS (ARIB/ISDB и DVB)")
-    ap.add_argument("path", help="файл .ts / .m2t / .m2ts")
-    ap.add_argument("--json", action="store_true", help="вывести JSON вместо отчёта")
+        description="Inventory of a broadcast TS (ARIB/ISDB and DVB)")
+    ap.add_argument("path", help="a .ts / .m2t / .m2ts file")
+    ap.add_argument("--json", action="store_true", help="print JSON instead of the report")
     ap.add_argument("--sig", action="store_true",
-                    help="дамп сигнализации без счётчиков — удобно для diff "
-                         "эталонного потока со своим муксом")
+                    help="dump the signalling without counters -- handy for diffing "
+                         "a reference stream against your own mux")
     ap.add_argument("--max-mb", type=float, default=None,
-                    help="читать только первые N МиБ")
+                    help="read only the first N MiB")
     ap.add_argument("--events", type=int, default=5,
-                    help="сколько событий EPG показать (по умолчанию 5)")
+                    help="how many EPG events to show (5 by default)")
     ap.add_argument("--charset", choices=("auto", "arib", "dvb", "ascii"), default="auto",
-                    help="кодировка текстовых полей SI")
+                    help="character set of the SI text fields")
     args = ap.parse_args()
 
     if not os.path.isfile(args.path):
-        sys.exit("Нет такого файла: %s" % args.path)
+        sys.exit("No such file: %s" % args.path)
 
     a = TSAnalyzer(args.path, charset=args.charset,
                    max_bytes=int(args.max_mb * 1024 * 1024) if args.max_mb else None,
