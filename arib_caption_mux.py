@@ -4,234 +4,178 @@
 arib_caption_mux.py
 ===================
 
-Muxes subtitles (SRT or ASS) into an MPEG-2 Transport Stream as ARIB STD-B24
-captions ("字幕", the Japanese digital-TV format) -- that is, the inverse of
-what libaribcaption does -- and rebuilds the stream the way a D-VHS deck
-expects it: either the "partial TS" a BS/CS/terrestrial tuner sends over
-i.LINK (ARIB STD-B21), a full broadcast-looking stream, or the layout used
-on pre-recorded D-Theater tapes (IEC 60774-5).
+Вставляет субтитры (SRT) в MPEG-2 Transport Stream в формате ARIB STD-B24
+(«字幕», как в японском цифровом ТВ) — то есть делает обратное тому, что
+делает libaribcaption — и пересобирает поток в «partial TS» по ARIB STD-B21,
+в том виде, в каком его выдаёт BS/CS/наземный цифровой тюнер по i.LINK
+(IEEE 1394) при записи на D-VHS.
 
-What the output contains
+Что получается на выходе
 ------------------------
-* PAT  -- exactly one program (no NIT entry) in partial mode.
-* PMT  -- the source PMT of the chosen service plus the caption ES:
+* PAT  — ровно одна программа (без записи NIT, PID 0x0000).
+* PMT  — исходная PMT выбранного сервиса + ES субтитров:
          stream_type 0x06, stream_identifier_descriptor (component_tag 0x30),
          data_component_descriptor (data_component_id 0x0008,
-         additional_arib_caption_info 0x3D) -- byte for byte as on BS.
-         digital_copy_control / content_availability are preserved.
-* ES   -- video, audio, the PCR PID and the other ES of the service. ECM,
-         NIT, SDT, EIT, TOT, BIT, SDTT and null packets are dropped: a
-         partial TS must not carry them.
-* SIT  -- Selection Information Table (PID 0x001F, table_id 0x7F) once per
-         second (ARIB asks for at least one every 3 s):
+         additional_arib_caption_info 0x3D) — байт-в-байт как на BS.
+         digital_copy_control / content_availability сохраняются как есть.
+* ES   — видео, звук, PCR-PID и прочие ES сервиса (ECM, NIT, SDT, EIT, TOT,
+         BIT, SDTT и null-пакеты выбрасываются: в partial TS их быть не должно).
+* SIT  — Selection Information Table (PID 0x001F, table_id 0x7F), раз в секунду
+         (ARIB требует не реже 1 раза в 3 с):
            transmission_info_loop:
-             partial_transport_stream_descriptor (0x63)   -- mandatory
-             network_identification_descriptor   (0xC2)   -- mandatory
+             partial_transport_stream_descriptor (0x63)   — обязательный
+             network_identification_descriptor  (0xC2)    — обязательный
            service_loop:
-             partial_TS_time_descriptor (0xC3) -- event time plus JST from TOT
-             service descriptors taken from the SDT
-             current-event descriptors from EIT[p/f] (short/extended event,
+             partial_TS_time_descriptor (0xC3) — время события + JST из TOT
+             дескрипторы сервиса из SDT (service_descriptor и т.п.)
+             дескрипторы текущего события из EIT[p/f] (short/extended event,
              component, audio_component, content, data_content, DCCD, ...)
-* DIT  -- Discontinuity Information Table (PID 0x001E) at PCR breaks.
-* Captions -- synchronous PES (stream_id 0xBD) carrying data groups:
-         caption_management_data every 0.5 s and caption_statement_data per
-         cue. Screen layout follows Japanese broadcasters: SWF 7 (960x540),
-         SDF 620x480, SDP 170,30, SSM 36x36, SHS 4, SVS 24, APS positioning,
-         a half-transparent black box, up to 15 full-width glyphs per line,
-         centred.
+* DIT  — Discontinuity Information Table (PID 0x001E) в местах разрыва PCR.
+* Субтитры — синхронные PES (stream_id 0xBD) с data_group:
+         caption_management_data каждые 0.5 с и caption_statement_data
+         на каждую фразу; раскладка экрана как у BS-вещателей:
+         SWF 7 (960x540), SDF 620x480, SDP 170,30, SSM 36x36, SHS 4, SVS 24,
+         позиционирование ACPS, полупрозрачная чёрная подложка, до 15
+         полноширинных знаков в строке, выравнивание по центру.
 
-Service information modes (--si)
---------------------------------
-  partial   (default) partial TS for D-VHS: PAT/PMT/SIT/DIT, every other SI
-            table dropped -- this is what a tuner sends over i.LINK.
-  broadcast like a BS broadcast: PAT (with NIT), PMT, NIT (network_name,
+Режимы служебных таблиц (--si)
+------------------------------
+  partial   (по умолчанию) partial TS для D-VHS: PAT/PMT/SIT/DIT, всё прочее
+            SI выбрасывается — так поток выдаёт тюнер по i.LINK.
+  broadcast как в эфире BS: PAT (с NIT), PMT, NIT (network_name,
             system_management, service_list, satellite_delivery), SDT,
-            EIT[p/f] plus a basic EIT schedule, TOT, BIT and the 0x138
-            superimpose stream. For a stream that did not come from Japanese
-            broadcast the tables are built from --service-name/--event-name/
-            --jst/--genre and friends; the component descriptors (1080i/16:9,
-            AAC stereo 48 kHz and so on) are derived from the ES themselves.
-            A Japanese stream that already has full SI is left alone unless
-            --si-regenerate is given.
-  both      broadcast tables plus SIT.
-  keep      leave the stream alone, only add captions (= --no-partial-ts).
-  --arib-pids renumbers PIDs the broadcast way: PMT 0x01F0, video 0x0100,
-            audio 0x0110, separate PCR 0x01FF.
-  Never generated: ECM/EMM (conditional access), SDTT, CDT, BML data
-  carousels -- those are content, not a description of the stream.
+            EIT[p/f] и базовое расписание EIT, TOT, BIT, служебный поток
+            суперимпоза 0x138. Для потока не из японского эфира таблицы
+            строятся из ключей --service-name/--event-name/--jst/--genre...,
+            компоненты (1080i/16:9, AAC стерео 48 кГц и т.п.) — по самим ES.
+            Японский поток с полным SI остаётся как есть (--si-regenerate).
+  both      эфирные таблицы + SIT.
+  keep      исходный поток не трогается, только субтитры (= --no-partial-ts).
+  --arib-pids — эфирная нумерация PID: PMT 0x01F0, видео 0x0100, звук 0x0110.
+  Не генерируются: ECM/EMM (условный доступ), SDTT, CDT, карусели данных BML.
 
-D-Theater tape mode (--dtheater)
---------------------------------
-Pre-recorded tapes are laid out differently from a broadcast recording.
-Verified against a demo tape and against IEC 60774-5:
-  * only PAT and PMT -- no NIT/SDT/EIT/TOT, and the tape examined carries no
-    SIT either;
-  * constant bit rate, padded with null packets (8.9 % on the tape);
-  * PAT and PMT repeat about 20 times per second;
-  * PIDs are low: PMT 0x0010, video 0x0011, audio 0x0014 and up;
-  * copy control travels in the DTCP_descriptor (0x88), not in the ARIB
-    0xC1/0xDE pair -- the standard says so explicitly and adds that equipment
-    must not alter it;
-  * the PMT must carry the MTRM registration descriptor plus
-    maximum_bitrate_descriptor and smoothing_buffer_descriptor.
-The encryption found on factory tapes cannot be reproduced: it is declared by
-the application-detail field of the tape data header, a layer below the
-transport stream, and only licensed duplication equipment could write it.
-What is available instead is output protection -- see --dtcp-cci.
+ASS/SSA
+-------
+Позиция (\\pos, начало \\move), выравнивание, поля, основной цвет (8 цветов
+ARIB), размер (обычный или малый SSZ), прозрачность FF переносятся;
+рисунки, повороты, масштаб, анимации, затухания, обводка, клипы, шрифты и
+караоке пропускаются. Одновременные события компонуются в один экран,
+покадровый трекинг склеивается в статичные надписи, строки одной надписи
+собираются в блок (порядок — с учётом \\frz). Ключи --ass-signs,
+--ass-skip-styles, --ass-only-styles, --ass-small, --ass-min-duration.
 
-ASS / SSA
----------
-Position (\\pos, the start point of \\move), alignment, margins, primary
-colour (mapped onto the 8 ARIB colours), size (normal or small SSZ) and an
-alpha of FF are carried over. Drawings, rotation, scaling, animation, fades,
-borders, clips, fonts and karaoke are skipped. Simultaneous events are
-composed onto a single screen, per-frame tracking is collapsed into static
-signs, and the lines of one sign are grouped into a block (ordered with
-\\frz taken into account). See --ass-signs, --ass-skip-styles,
---ass-only-styles, --ass-small, --ass-min-duration.
+--ass-dialogue-only — только реплики. Стиль отбрасывается по имени (Signs,
+Надписи, OP/ED, Karaoke, Notes, Title... — в т.ч. FrierenSigns, OP-Romaji)
+или по содержимому (обычных строк меньше 70%, если их не 20+ и 40%+).
+В оставшихся стилях отбрасывается каждое событие с \\pos (не в точке
+стиля), \\move, \\k, \\clip, \\org, поворотом, наклоном, рисунком, Effect
+fx/karaoke или «надпись» в поле Name. \\an8, курсив, цвет, \\fad — остаются.
+--ass-list-styles — показать решение по каждому стилю и выйти; ошибку
+эвристики правят --ass-only-styles / --ass-skip-styles.
 
---ass-dialogue-only keeps dialogue only. A style is dropped by name (Signs,
-OP/ED, Karaoke, Notes, Title... including FrierenSigns or OP-Romaji) or by
-content (plain lines below 70 %, unless there are 20+ of them and at least
-40 %). Inside the remaining styles every event with \\pos (away from the
-style's own anchor), \\move, \\k, \\clip, \\org, rotation, shear, a drawing, an
-fx/karaoke Effect field or a "sign" Name is dropped. \\an8, italics, colour
-and \\fad survive. --ass-list-styles prints the verdict per style and exits;
---ass-only-styles / --ass-skip-styles override it.
+Позиционирование строк (--positioning)
+--------------------------------------
+По умолчанию APS (строка/столбец от угла области). Проверено на реальной
+деке: ACPS она отсчитывает от угла области SDP (+170,+30), а не от угла
+экрана, поэтому строки уезжали вправо-вниз и переносились по кругу наверх.
+--positioning acps — прежнее поведение (точки, как BS-вещатель в образце).
 
-Line positioning (--positioning)
---------------------------------
-APS (row/column relative to the display area) by default. Verified on real
-hardware: the deck measures ACPS from the corner of the SDP area (+170,+30)
-rather than from the corner of the screen, so lines drifted right and down
-and wrapped around to the top. --positioning acps restores the previous
-behaviour (dots, the way the BS broadcaster does it).
+Без субтитров
+-------------
+  python3 arib_caption_mux.py in.m2t -o out.m2t    # только перемукс/SI/звук
 
-Latin, Cyrillic and the display area
-------------------------------------
-Latin letters and digits are always half width (MSZ); no switch is needed.
-Cyrillic (including Yo) lives in JIS X 0208 and encodes natively, but in
-full-width cells like kanji: 15 letters per line.
-  --cyrillic half     Cyrillic at half width (MSZ): 30 letters per line, the
-                      receiver squeezes the glyphs horizontally
-  --drcs-font auto    characters missing from JIS (« » „ “ ‹ › і ї є ґ ў and
-                      the like) are drawn as 36x36 four-level DRCS bitmaps,
-                      exactly how a broadcaster ships its own special glyphs;
-                      needs Pillow. A path to a .ttf also works.
-  --area 880x480+40+30 widens the display area: 44 characters per line
-                      instead of 31.
-Without --drcs-font: « » -> ≪ ≫, „ “ -> “ ”, ‹ › -> 〈 〉, і -> i; ї є ґ ў -> 〓.
-
-Text encoding (--encoding)
---------------------------
-jis (default) uses the ARIB character sets. utf8 sets TCS = 1 in the
-management packet and sends UTF-8, with C1 codes escaped as 0xC2 + code.
-The TCS field outranks the language code, so in utf8 mode --caption-lang may
-be anything, including eng. In jis mode eng/tgl switch the receiver to UTF-8
-parsing and por/spa to the ABNT Latin sets, which would garble JIS text --
-use jpn there, the language code does not affect the picture.
-
-Multiple caption tracks
+Управление копированием
 -----------------------
-Several subtitle files may be given. By default they are packed the way
-broadcast does it: one ES, with the languages told apart by data_group_id
-(字幕1, 字幕2) -- this is what a receiver switches between. Two languages
-per ES is the limit. --caption-multi es puts each track in its own ES with
-its own component_tag; that is legal but real decks show only the first one.
+  --show/--list                показывает 0xC1 и 0xDE входного потока
+  --copy free|once|never|broadcaster (или биты 00 01 10 11)
+  --user-defined N             младший полубайт 0xC1
+  --content-availability 0xEF  байт 0xDE целиком
+  --diff ФАЙЛ                  побайтовое сравнение двух файлов
+Значения попадают в PMT, а при генерации SI — ещё в EIT и SIT, как у вещателя.
+Если задать только эти ключи (без субтитров, звука и смены SI, с --si keep),
+секции PMT правятся на месте с пересчётом CRC, а остальной файл копируется
+байт в байт, включая заголовок перед синхробайтом и неполный хвост.
+На i.LINK поверх этого работает DTCP, и режим на шине задаёт передающее
+устройство: биты в потоке — сигнализация, а не сама защита. Для записи из
+эфира они отражают условия вещателя.
 
-  python3 arib_caption_mux.py in.m2t ru.ass jp.srt -o out.m2t \\
-      --caption-lang rus,jpn --offset 0,-0.5
+Звук
+----
+  --audio FILE         дорожка AAC: WAV/FLAC -> MPEG-2 AAC-LC 48 кГц (fdkaac: ADTS
+                       с CRC, как у вещателя; иначе ffmpeg) или готовый .aac.
+                       Повторяйте для нескольких дорожек — порядок сохраняется,
+                       первая основная (main_component_flag). Синонимы:
+                       --audio-wav / --audio-aac.
+  --keep-audio         исходный звук остаётся, новые дорожки идут после него.
+  --audio-lang jpn,rus языки всех звуковых ES по порядку PMT.
+  --audio-name NAME    название новой дорожки в EIT/SIT (повторяйте).
+  --audio-channels 6   5.1 (3/2+LFE): в ARIB это component_type 0x09; по умолчанию
+                       столько каналов, сколько в WAV (1, 2 или 6).
+  --audio-mp2 FILE     дорожка MPEG-1 Layer II, stream_type 0x03 (WAV кодируется
+                       libtwolame, готовый .mp2 берётся как есть). В японском
+                       вещании такого звука нет и ARIB-приёмники его игнорируют,
+                       но деки других производителей ждут именно его — поэтому
+                       обычную сборку делают из двух дорожек: AAC и MP2.
+                       Layer II многоканальным не бывает: 5.1 сводится в стерео.
+  Готовые файлы .aac/.mp2/.mpa берутся как есть, перекодирования нет; параметры
+  (частота, каналы, битрейт) читаются из самих кадров. Задержка кодировщика в
+  готовом файле не записана: для Layer II она задана форматом (482 отсч.), для
+  AAC берётся 2048 — если звук уедет, поставьте --audio-delay-samples 1024.
+  --audio-offset 0,-0.1 / --audio-bitrate 384,192 — по дорожкам
+                       (по умолчанию 256, для 5.1 — 384, для моно — 144).
+  --audio-lang-pmt     ISO 639 в PMT, чтобы языки видели плееры (у BS его нет).
+  PID 0x0110, 0x0111... (с --arib-pids), component_tag 0x10, 0x11...;
+  PES по 736 байт с PTS, задержка кодера учитывается.
 
-SRT accepts UTF-8 with <font color="yellow|#RRGGBB">...</font> (colours are
-mapped onto the 8 ARIB colours) and {\\an8} for a cue at the top.
-
-Audio
------
-  --audio FILE         an AAC track: WAV/FLAC -> MPEG-2 AAC-LC 48 kHz (fdkaac
-                       gives ADTS with CRC like the broadcaster, otherwise
-                       ffmpeg), or a ready .aac. Repeat for several tracks;
-                       the order is kept and the first one is the main
-                       component. Aliases: --audio-wav / --audio-aac.
-  --audio-mp2 FILE     MPEG-1 Layer II, stream_type 0x03. Japanese broadcast
-                       does not use it, but decks from other makers expect
-                       it, so a common build carries both AAC and MP2.
-                       Layer II has no multichannel mode: 5.1 is downmixed.
-  --audio-ac3 FILE     Dolby Digital, stream_type 0x81 -- the audio found on
-                       D-Theater tapes. 48 kHz, up to 640 kbit/s, mode 1+1
-                       forbidden. Defaults: 576 kbit/s for 5.1 (as on tapes),
-                       192 stereo, 96 mono.
-  --audio-pcm FILE     linear PCM per SMPTE 302M, stream_type 0x83 -- what a
-                       deck records itself in STD mode. Always 48 kHz,
-                       16 bit, stereo. --pcm-bit-order picks the order of the
-                       four status bits inside the 20-bit field: dvhs (the
-                       deck puts them first) or ffmpeg (last).
-  --keep-audio         keep the original audio and append the new tracks.
-  --audio-lang jpn,rus languages of every audio ES in PMT order.
-  --audio-name NAME    track name written into EIT/SIT (repeatable).
-  --audio-channels 6   5.1 (3/2+LFE) -- component_type 0x09 in ARIB; by
-                       default as many channels as the WAV has (1, 2 or 6).
-  --audio-offset 0,-0.1 / --audio-bitrate 384,192 -- per track.
-  --audio-lang-pmt     ISO 639 in the PMT so players show the languages
-                       (broadcast does not do this).
-Ready-made .aac/.mp2/.ac3 files are taken as they are; their parameters are
-read from the frames. Encoder delay is not stored in such a file: Layer II
-uses 482 samples (fixed by the format), AC-3 256, AAC is assumed to be 2048
--- pass --audio-delay-samples 1024 if the sound drifts.
-Audio PES are 736 bytes with PTS, and encoder delay is compensated.
-
-Copy control
-------------
-  --show/--list                print 0xC1 and 0xDE of the input
-  --copy free|once|never|broadcaster (or the raw bits 00 01 10 11)
-  --copy-control-type          01 encrypted output, 11 no encryption
-  --aps / --user-defined       analogue protection, or the whole low nibble
-  --content-availability 0xEF  the entire 0xDE payload byte
-  --epn                        copy free but with protected output
-  --diff FILE                  byte-for-byte comparison of two files
-The low four bits of 0xC1 are named user_defined in the standard, but ARIB
-operational rules define them as copy_control_type (bits 3-2) and
-APS_control_data (bits 1-0). copy_control_type 00 is undefined and receivers
-treat such content as protected, so "copy free" with a zero nibble behaves
-like "copy never"; the script fills the field in for you.
-Values go into the PMT, and with generated SI also into EIT and SIT. If only
-these switches are given (no subtitles, no audio, no SI change, with
---si keep), the PMT sections are patched in place with the CRC recomputed and
-the rest of the file is copied byte for byte, including the bytes before the
-first sync byte and a trailing partial packet.
-On i.LINK, DTCP runs on top of all this and the sending device decides the
-mode: the bits in the stream are signalling, not protection in themselves.
-For an off-air recording they reflect the broadcaster's terms.
-
-Usage
------
+Использование
+-------------
   python3 arib_caption_mux.py input.m2t subs.srt -o output.m2t
-  python3 arib_caption_mux.py input.m2t --list                 # what is inside
+  python3 arib_caption_mux.py input.m2t --list                 # что внутри
   python3 arib_caption_mux.py input.m2t subs.srt -o out.m2t --service-id 171
   python3 arib_caption_mux.py in.m2t subs.srt -o out.m2t --no-partial-ts
-  python3 arib_caption_mux.py in.m2t subs.srt -o out.m2t --existing keep
-  python3 arib_caption_mux.py in.m2t -o out.m2t                # remux only
-  python3 arib_caption_mux.py my.m2t episode.ass -o out.m2t \\
-      --audio jp.wav --audio-mp2 jp.wav      # AAC for Japanese decks, MP2 for others
-  python3 arib_caption_mux.py my.m2t episode.ass -o out.m2t --cyrillic half \\
-      --si broadcast --arib-pids --out-service-id 171 --ts-id 0x4012 \\
-      --service-name "ＢＳテスト" --event-name "Episode 1" --genre anime \\
+  python3 arib_caption_mux.py in.m2t subs.srt -o out.m2t --existing keep  # второй ES 0x31
+  python3 arib_caption_mux.py my.m2t episode.ass -o out.m2t \
+      --audio jp.wav --audio-mp2 jp.wav      # AAC японским декам, MP2 прочим
+  python3 arib_caption_mux.py my.m2t episode.ass -o out.m2t --cyrillic half \
+      --si broadcast --arib-pids --out-service-id 171 --ts-id 0x4012 \
+      --service-name "ＢＳテスト" --event-name "Серия 1" --genre anime \
       --caption-lang rus --jst "2026-08-02 07:00:00"
-  python3 arib_caption_mux.py my.m2t -o tape.m2t --dtheater \\
-      --audio-mp2 stereo.wav --audio-ac3 surround.wav --dtcp-cci never
 
-A stream that did not come from Japanese broadcast (HDV, ffmpeg output and so
-on): its SDT/EIT/TOT are not reused, because they carry DVB strings and UTC.
-Supply the SIT data through the switches instead:
-  python3 arib_caption_mux.py hdv.m2t subs.srt -o out.m2t --network-id 4 \\
+Поток не из японского эфира (HDV, ffmpeg и т.п.): SDT/EIT/TOT из него не
+копируются (там DVB-строки и UTC), данные для SIT задаются ключами:
+  python3 arib_caption_mux.py hdv.m2t subs.srt -o out.m2t --network-id 4 \
       --service-name "ＢＳテスト" --event-name "ホームビデオ" --jst "2026-08-02 07:00:00"
 
-SRT timing: zero is the earliest audio/video PTS, the same reference ffmpeg,
-mpv and VLC use. At a PCR break (a splice) a DIT is inserted and subtitle
-timing continues on a continuous playback scale.
+Отсчёт времени SRT: 0 = самый ранний PTS аудио/видео (как у ffmpeg/mpv/VLC).
+При разрыве PCR (склейка) вставляется DIT, а время SRT идёт по непрерывной
+шкале воспроизведения.
 
-No dependencies beyond Python 3.8+; ffmpeg is needed for audio, Pillow for
---drcs-font. The ARIB additional-symbol table (rows 85-86, 90-94) comes from
-libaribcaption (c) magicxqq, ISC licence.
+Несколько дорожек субтитров
+---------------------------
+Файлов субтитров можно указать сколько угодно (до 8 — предел ARIB): каждый
+станет отдельным ES с component_tag 0x30, 0x31... (字幕1, 字幕2...), между
+которыми приёмник переключается. Языки и сдвиги — по дорожкам:
+  python3 arib_caption_mux.py in.m2t ru.ass jp.srt -o out.m2t \
+      --caption-lang rus,jpn --offset 0,-0.5
+
+SRT: UTF-8, поддерживаются <font color="yellow|#RRGGBB">...</font>
+(цвет приводится к 8 цветам ARIB) и {\\an8} — субтитр вверху кадра.
+
+Русский и другие языки
+----------------------
+Кириллица (включая Ё/ё) есть в JIS X 0208 и кодируется штатно. Буквы стоят
+в полноширинных клетках, как иероглифы: 15 букв в строке, перенос по словам.
+  --cyrillic half     кириллица вполширины (MSZ): 30 букв в строке, приёмник
+                      сжимает глифы вдвое по горизонтали
+  --drcs-font auto    знаки, которых нет в JIS (« » „ “ ‹ › і ї є ґ ў и т.п.),
+                      рисуются картинками DRCS 36x36 в 4 градации — так же,
+                      как вещатель передаёт свои особые знаки; нужен Pillow.
+                      Можно указать путь к .ttf с кириллицей.
+Без --drcs-font « » -> ≪ ≫, „“ -> “”, ‹ › -> 〈 〉, і -> i; ї є ґ ў -> 〓.
+
+Зависимостей нет, нужен только Python 3.8+.
+Таблица дополнительных символов ARIB (ряды 85–86, 90–94) взята из
+libaribcaption (c) magicxqq, лицензия ISC.
 """
 
 import argparse
@@ -284,7 +228,7 @@ def crc32_mpeg(data):
 
 
 def crc16_ccitt(data):
-    """CRC-16 from ARIB STD-B24 (x^16+x^12+x^5+1, initial value 0)."""
+    """CRC-16 из ARIB STD-B24 (x^16+x^12+x^5+1, начальное значение 0)."""
     c = 0
     for b in data:
         c = ((c << 8) & 0xFFFF) ^ _CRC16[((c >> 8) ^ b) & 0xFF]
@@ -292,7 +236,7 @@ def crc16_ccitt(data):
 
 
 # ---------------------------------------------------------------------------
-# Encoding text into the 8-unit code of ARIB STD-B24
+# Кодирование текста в 8-единичный код ARIB STD-B24
 # ---------------------------------------------------------------------------
 ARIB_ADDITIONAL_ROWS = {
     85: (
@@ -353,12 +297,12 @@ ARIB_ADDITIONAL_ROWS = {
     ),
 }
 
-# Control codes
+# Управляющие коды
 LS0, LS1, APS, CS, SP = 0x0F, 0x0E, 0x1C, 0x0C, 0x20
 BKF, RDF, GRF, YLF, BLF, MGF, CNF, WHF = range(0x80, 0x88)
 SSZ, MSZ, NSZ, COL, CSI = 0x88, 0x89, 0x8A, 0x90, 0x9B
 
-# The 8 base colours of palette 0 (for SRT <font color>)
+# 8 основных цветов палитры 0 (для SRT <font color>)
 ARIB_COLORS = [
     ((0, 0, 0), BKF), ((255, 0, 0), RDF), ((0, 255, 0), GRF), ((255, 255, 0), YLF),
     ((0, 0, 255), BLF), ((255, 0, 255), MGF), ((0, 255, 255), CNF), ((255, 255, 255), WHF),
@@ -372,7 +316,7 @@ NAMED_COLORS = {
 
 
 def color_code(spec):
-    """'yellow' / '#ffff00' / None -> a C1 code (BKF..WHF)."""
+    """'yellow' / '#ffff00' / None -> код C1 (BKF..WHF)."""
     if not spec:
         return WHF
     spec = spec.strip().lower()
@@ -387,20 +331,20 @@ def color_code(spec):
 
 
 class AribCharset:
-    """Unicode -> codes of the Kanji set (JIS X 0208 plus the ARIB extra
-    symbols) and of the Alphanumeric set (G1)."""
+    """Unicode -> коды наборов «Кандзи» (JIS X 0208 + доп. символы ARIB) и
+    «Алфавитно-цифровой» (G1)."""
 
-    # Characters that Windows/macOS text spells differently from JIS
+    # Символы, которые в Windows/macOS-текстах выглядят иначе, чем в JIS
     ALIASES = {
         '\uff5e': '\u301c',  # ～ -> 〜
         '\u2212': '\uff0d',  # − -> －
         '\u2015': '\u2014',  # ― -> —
         '\u2225': '\u2016',  # ∥ -> ‖
         '\uffe0': '\u00a2', '\uffe1': '\u00a3', '\uffe2': '\u00ac',
-        '\u00a5': None,      # yen sign is encoded in the alphanumeric set (0x5C)
+        '\u00a5': None,      # ¥ кодируется в алфавитно-цифровом наборе (0x5C)
     }
 
-    # Substitutions for glyphs missing from JIS X 0208 (when --drcs-font is off)
+    # Замены знаков, которых нет в JIS X 0208 (когда не задан --drcs-font)
     SUBST = {
         '\u00ab': '\u226a', '\u00bb': '\u226b',      # « » -> ≪ ≫
         '\u2039': '\u3008', '\u203a': '\u3009',      # ‹ › -> 〈 〉
@@ -412,14 +356,14 @@ class AribCharset:
     }
 
     def __init__(self, half_letters=False, drcs=None):
-        """half_letters draws Cyrillic and Greek from the Kanji set at half
-        width (MSZ); drcs is a DrcsFont for glyphs outside the ARIB sets."""
+        """half_letters — кириллицу и греческий из набора Кандзи выводить
+        вполширины (MSZ); drcs — DrcsFont для знаков вне наборов ARIB."""
         self.half = half_letters
         self.drcs = drcs
         self.kanji = {}
         for b1 in range(0xA1, 0xFF):
             for b2 in range(0xA1, 0xFF):
-                if b1 - 0xA0 >= 85:          # rows 85+ are ARIB's own
+                if b1 - 0xA0 >= 85:          # ряды 85+ — у ARIB свои
                     continue
                 try:
                     ch = bytes((b1, b2)).decode('euc_jp')
@@ -431,7 +375,7 @@ class AribCharset:
             if target and alias not in self.kanji:
                 code = self.kanji.get(target)
                 if code is None:
-                    # the other direction: target missing, alias present
+                    # обратное направление: target отсутствует, alias есть
                     continue
                 self.kanji[alias] = code
         for alias, target in self.ALIASES.items():
@@ -456,15 +400,15 @@ class AribCharset:
         return ord(ch)
 
     def direct(self, ch):
-        """The glyph is encodable with the standard ARIB sets (no DRCS)."""
+        """Знак кодируется штатными наборами ARIB (без DRCS)."""
         if ENCODING == 'utf8':
-            return True                  # UCS encodes anything
+            return True                  # в UCS кодируется что угодно
         return ch == ' ' or ch in self.kanji or self.is_alnum(ch)
 
     def normalize(self, text, allow_drcs=True):
         use_drcs = allow_drcs and self.drcs is not None
-        # NFC composes i+breve, e+diaeresis, ka+dakuten; compatibility ideographs
-        # (U+F900..U+FAFF, present in the ARIB extra set) are left alone
+        # NFC собирает й = и+◌̆, ё = е+◌̈, が = か+゛; совместимые иероглифы
+        # (U+F900..U+FAFF, есть в доп. наборе ARIB) NFC не трогаем
         if any(unicodedata.combining(c) or c in '\u3099\u309a' for c in text):
             text = ''.join(part if re.fullmatch(r'[\uf900-\ufaff]+', part) else unicodedata.normalize('NFC', part)
                            for part in re.split(r'([\uf900-\ufaff]+)', text))
@@ -472,7 +416,7 @@ class AribCharset:
         low_quote = False
         for ch in text:
             o = ord(ch)
-            if 0xFF61 <= o <= 0xFF9F:        # half-width katakana -> full width
+            if 0xFF61 <= o <= 0xFF9F:        # полуширинная катакана -> полноширинная
                 ch = unicodedata.normalize('NFKC', ch)
             elif ch == '\\':
                 ch = '\uff3c'
@@ -487,7 +431,7 @@ class AribCharset:
                     low_quote = True
                 ch = self.SUBST[ch]
                 if 'A' <= ch <= 'z' and ch.isalpha() and not self.half:
-                    ch = chr(ord(ch) + 0xFEE0)   # i -> full width, to match full-width Cyrillic
+                    ch = chr(ord(ch) + 0xFEE0)   # i -> ｉ, чтобы не выбиваться из полноширинной кириллицы
             elif ch == '\u201c' and low_quote and not use_drcs:
                 ch = '\u201d'                      # „…“ -> “…”
                 low_quote = False
@@ -498,7 +442,7 @@ class AribCharset:
         return self.half and ('\u0370' <= ch <= '\u04ff')
 
     def width(self, ch):
-        """Width in half cells: an MSZ glyph is 1, an NSZ glyph is 2."""
+        """Ширина в полуклетках: MSZ-знак = 1, NSZ-знак = 2."""
         if ENCODING == 'utf8':
             if unicodedata.east_asian_width(ch) in 'WF':
                 return 2
@@ -513,8 +457,8 @@ class AribCharset:
 
 
 class DrcsFont:
-    """Draws glyphs missing from the ARIB sets as DRCS: 36x36, 4 levels,
-    mode 1 -- the same format a BS broadcaster uses. Needs Pillow."""
+    """Рисует знаки, которых нет в наборах ARIB, как DRCS: 36x36, 4 градации,
+    режим 1 — тот же формат, что у BS-вещателя в образце. Нужен Pillow."""
 
     CANDIDATES = [
         'C:/Windows/Fonts/arial.ttf', 'C:/Windows/Fonts/segoeui.ttf',
@@ -527,12 +471,12 @@ class DrcsFont:
         try:
             from PIL import Image, ImageDraw, ImageFont
         except ImportError:
-            raise SystemExit('--drcs-font needs Pillow: pip install pillow')
+            raise SystemExit('для --drcs-font нужен Pillow: pip install pillow')
         self.Image, self.ImageDraw = Image, ImageDraw
         if path == 'auto':
             path = self._find()
         self.path = path
-        self.S = 4                                   # supersampling
+        self.S = 4                                   # суперсэмплинг
         self.ImageFont = ImageFont
         self.fonts = {}
         self.cache = {}
@@ -543,7 +487,7 @@ class DrcsFont:
             try:
                 self.fonts[size] = self.ImageFont.truetype(self.path, int(size * 0.86) * self.S)
             except OSError:
-                raise SystemExit('could not open font %r for --drcs-font' % self.path)
+                raise SystemExit('не удалось открыть шрифт %r для --drcs-font' % self.path)
         return self.fonts[size]
 
     def _find(self):
@@ -561,7 +505,7 @@ class DrcsFont:
         for f in self.CANDIDATES:
             if os.path.exists(f):
                 return f
-        raise SystemExit('no font with Cyrillic found, pass a path: --drcs-font /path/to/font.ttf')
+        raise SystemExit('не нашёл шрифт с кириллицей, укажите путь: --drcs-font /путь/к/шрифту.ttf')
 
     def pattern(self, ch, half, size=36):
         key = (ch, half, size)
@@ -584,7 +528,7 @@ class DrcsFont:
             glyph = glyph.resize((limit, N * S))
         canvas = self.Image.new('L', (cell, N * S), 0)
         canvas.paste(glyph, ((cell - glyph.width) // 2, 0))
-        if half:                                     # the receiver squeezes an MSZ glyph in half
+        if half:                                     # приёмник сожмёт MSZ-знак вдвое
             canvas = canvas.resize((N * S, N * S))
         small = canvas.resize((N, N), self.Image.BOX)
         acc = bytearray()
@@ -602,24 +546,24 @@ class DrcsFont:
 
 
 class StatementBody:
-    """Builds the body of a caption_statement (data_unit 0x20), tracking the
-    GL state (G0 kanji / G1 alphanumeric), size, colour and DRCS."""
+    """Сборка тела caption_statement (data_unit 0x20) с отслеживанием
+    состояния GL (G0 кандзи / G1 латиница), размера, цвета и DRCS."""
 
     def __init__(self, charset, warn, allow_drcs=True):
         self.cs = charset
         self.warn = warn
         self.buf = bytearray()
-        self.gl = 0          # 0 = G0 (Kanji), 1 = G1 (alphanumeric)
+        self.gl = 0          # 0 = G0 (Кандзи), 1 = G1 (алфавитно-цифровой)
         self.size = None
         self.fg = None
         self.allow_drcs = allow_drcs and charset.drcs is not None
-        self.drcs_codes = {}  # glyph -> (code 0x21.., pattern)
+        self.drcs_codes = {}  # знак -> (код 0x21.., шаблон)
         self.g2_drcs = False
-        self.si_style = False  # SI strings: LS1 first, then MSZ; no trailing LS0
+        self.si_style = False  # строки SI: сначала LS1, потом MSZ; без LS0 в конце
         self.utf8 = ENCODING == 'utf8' and allow_drcs is not False
 
     def c1(self, code):
-        """A C1 code: in UCS mode it travels as UTF-8 (0xC2 + code)."""
+        """Код C1: в режиме UCS он передаётся как UTF-8 (0xC2 + код)."""
         if self.utf8:
             self.buf.append(0xC2)
         self.buf.append(code)
@@ -636,7 +580,7 @@ class StatementBody:
 
     def set_gl(self, g):
         if self.utf8:
-            return                       # UCS has no code sets to switch
+            return                       # в UCS наборов нет, переключать нечего
         if self.gl != g:
             self.buf.append(LS1 if g else LS0)
             self.gl = g
@@ -662,7 +606,7 @@ class StatementBody:
         return code
 
     def put(self, ch, small=False):
-        """small=True selects the small SSZ size (18x18) for every glyph."""
+        """small=True — малый размер SSZ (18x18) для всех знаков."""
         if self.utf8:
             self.set_size(SSZ if small else MSZ if self.cs.width(ch) == 1 else NSZ)
             self.buf += ch.encode('utf-8')
@@ -684,13 +628,13 @@ class StatementBody:
             code = self._drcs(ch, small) if self.allow_drcs else None
             if code is not None:
                 if not self.g2_drcs:
-                    self.buf += bytes((0x1B, 0x2A, 0x20, 0x41))   # G2 <- DRCS-1, as on air
+                    self.buf += bytes((0x1B, 0x2A, 0x20, 0x41))   # G2 <- DRCS-1, как в эфире
                     self.g2_drcs = True
                 self.set_size(SSZ if small else MSZ if self.cs.width(ch) == 1 else NSZ)
-                self.buf.append(0x80 | code)                    # invoked through GR
+                self.buf.append(0x80 | code)                    # вызов через GR
                 return
-            hint = '' if self.allow_drcs else ' (it can be drawn with --drcs-font)'
-            self.warn('glyph %r (U+%04X) is not in the ARIB sets, replaced with GETA%s' % (ch, ord(ch), hint))
+            hint = '' if self.allow_drcs else ' (можно нарисовать через --drcs-font)'
+            self.warn('символ %r (U+%04X) отсутствует в наборах ARIB, заменён на 〓%s' % (ch, ord(ch), hint))
             self.set_size(NSZ)
             self.set_gl(0)
             self.buf += self.cs.kanji['\u3013']
@@ -700,7 +644,7 @@ class StatementBody:
             return None
         payload = bytearray((len(self.drcs_codes),))
         for code, pat, n in self.drcs_codes.values():
-            # CharacterCode 0x41xx (DRCS-1), 1 font, font_id 0 / mode 1, depth 2 (4 levels)
+            # CharacterCode 0x41xx (DRCS-1), 1 шрифт, font_id 0 / mode 1, depth 2 (4 градации)
             payload += bytes((0x41, code, 0x01, 0x01, 0x02, n, n)) + pat
         return data_unit(0x30, bytes(payload))
 
@@ -708,15 +652,15 @@ class StatementBody:
         if self.utf8:
             return bytes(self.buf)
         if self.si_style:
-            return bytes(self.buf)   # every SI string decodes from the initial state
-        self.set_gl(0)       # restore the initial GL state
+            return bytes(self.buf)   # каждая строка SI декодируется с исходного состояния
+        self.set_gl(0)       # вернуть исходное состояние GL
         if self.g2_drcs:
-            self.buf += bytes((0x1B, 0x2A, 0x30))                # G2 <- Hiragana (the default)
+            self.buf += bytes((0x1B, 0x2A, 0x30))                # G2 <- Хирагана (по умолчанию)
         return bytes(self.buf)
 
 
 # ---------------------------------------------------------------------------
-# Caption data groups and PES
+# data_group / PES субтитров
 # ---------------------------------------------------------------------------
 
 def data_unit(parameter, payload):
@@ -733,10 +677,10 @@ def data_group(group_id, payload, version=0):
 
 
 def caption_management_data(langs=(b'jpn',), dmf=0b1010, fmt=0b1000, tcs=None):
-    """As on BS: TMD=free, one language, DMF 1010 (user selects on reception
-    and on playback), Format 1000 = horizontal 960x540, TCS 8-bit."""
+    """Как на BS: TMD=free, 1 язык, DMF 1010 (выбор пользователем при
+    приёме и воспроизведении), Format 1000 = горизонтально 960x540, TCS 8 бит."""
     if tcs is None:
-        tcs = 1 if ENCODING == 'utf8' else 0        # 0 = ARIB sets, 1 = UCS/UTF-8
+        tcs = 1 if ENCODING == 'utf8' else 0        # 0 — наборы ARIB, 1 — UCS/UTF-8
     if isinstance(langs, (bytes, bytearray)):
         langs = [bytes(langs)]
     body = bytes((0x3F, len(langs)))
@@ -747,7 +691,7 @@ def caption_management_data(langs=(b'jpn',), dmf=0b1010, fmt=0b1000, tcs=None):
 
 
 def caption_statement_data(units, lang_tag=0):
-    """data_group_id = 1 + language_tag: this is how the receiver tells caption 1 from caption 2."""
+    """data_group_id = 1 + language_tag: так приёмник отличает 字幕1 от 字幕2."""
     loop = b''.join(units)
     n = len(loop)
     return data_group(0x01 + lang_tag, bytes((0x3F, n >> 16, (n >> 8) & 255, n & 255)) + loop)
@@ -765,8 +709,8 @@ def encode_pts(pts):
 
 
 def caption_pes(dg, pts, broadcast_header=True):
-    """Synchronous PES (stream_id 0xBD). By default the header copies the BS
-    broadcaster in the reference capture: PTS plus PES_extension with 16 bytes of private data."""
+    """Синхронный PES (stream_id 0xBD). Заголовок по умолчанию повторяет
+    BS-вещателя из образца: PTS + PES_extension с 16 байтами PES_private_data."""
     payload = b'\x80\xff\xf0' + dg     # data_identifier, private_stream_id, header_length=0
     if broadcast_header:
         opt = encode_pts(pts) + b'\x8e' + b'\xff' * 16 + b'\xff'
@@ -779,30 +723,30 @@ def caption_pes(dg, pts, broadcast_header=True):
 
 
 # ---------------------------------------------------------------------------
-# Laying a cue out on screen (the way Japanese BS broadcasters do)
+# Раскладка фразы на экране (как у японских BS-вещателей)
 # ---------------------------------------------------------------------------
 
-PLANE_SWF = 7                 # 960x540, horizontal writing
-ENCODING = 'jis'              # jis = ARIB sets; utf8 = UCS (TCS=1), text in UTF-8
-POSITIONING = 'aps'           # aps = row/column from the area corner; acps = dots (as a BS broadcaster)
+PLANE_SWF = 7                 # 960x540, горизонтальное письмо
+ENCODING = 'jis'              # jis — наборы ARIB; utf8 — UCS (TCS=1), текст в UTF-8
+POSITIONING = 'aps'           # aps — строка/столбец от угла области; acps — точки (как BS-вещатель)
 AREA_X, AREA_Y, AREA_W, AREA_H = 170, 30, 620, 480
 CHAR_W, CHAR_H, HSPACE, VSPACE = 36, 36, 4, 24
-CELL = CHAR_W + HSPACE        # 40 dots per full-width glyph
-LINE = CHAR_H + VSPACE        # 60 dots per row
-MAX_HALF = AREA_W // (CELL // 2)   # 31 -> 15 full-width glyphs
+CELL = CHAR_W + HSPACE        # 40 точек на полноширинный знак
+LINE = CHAR_H + VSPACE        # 60 точек на строку
+MAX_HALF = AREA_W // (CELL // 2)   # 31 -> 15 полноширинных знаков
 MAX_LINES = AREA_H // LINE         # 8
 
 
 def set_area(spec):
-    """--area WxH+X+Y: the caption area inside the 960x540 plane."""
+    """--area ШxВ+X+Y: область субтитров внутри плоскости 960x540."""
     global AREA_X, AREA_Y, AREA_W, AREA_H, MAX_HALF, MAX_LINES, GRID_COLS, GRID_ROWS
     m = re.fullmatch(r'\s*(\d+)x(\d+)([+-]\d+)([+-]\d+)\s*', spec)
     if not m:
-        raise SystemExit('--area takes WxH+X+Y, for example 880x480+40+30')
+        raise SystemExit('--area задаётся как ШxВ+X+Y, например 880x480+40+30')
     w, h, x, y = (int(v) for v in m.groups())
-    w, h = w // 20 * 20, h // 60 * 60          # snap to the half-cell and row grid
+    w, h = w // 20 * 20, h // 60 * 60          # по сетке полуклеток и строк
     if w < 40 or h < 60 or x < 0 or y < 0 or x + w > 960 or y + h > 540:
-        raise SystemExit('--area does not fit the 960x540 plane (got %dx%d+%d+%d)' % (w, h, x, y))
+        raise SystemExit('--area не помещается в плоскость 960x540 (получилось %dx%d+%d+%d)' % (w, h, x, y))
     AREA_X, AREA_Y, AREA_W, AREA_H = x, y, w, h
     MAX_HALF = AREA_W // (CELL // 2)
     MAX_LINES = AREA_H // LINE
@@ -813,13 +757,13 @@ NO_LINE_END = set('（［｛「『〔〈《【≪«„‹“‘([{')
 
 
 def _word_char(ch):
-    """A letter or digit of an alphabetic script: such words are not split."""
+    """Буква/цифра алфавитного письма: такие слова не рвём посередине."""
     o = ord(ch)
     return (ch.isalnum() and o < 0x2E80) or 0xFF10 <= o <= 0xFF5A or ch in "-'\u2019"
 
 
 def _greedy(chars, cs, target, nlines, small=False):
-    """Greedy layout: rows up to target, the last (nlines-th) up to MAX_HALF."""
+    """Жадная раскладка: строки до target, последняя (nlines-я) — до MAX_HALF."""
     width = (lambda c: 1) if small else cs.width
     lines, cur, w = [], [], 0
     for ch, col in chars:
@@ -834,8 +778,8 @@ def _greedy(chars, cs, target, nlines, small=False):
                 cur.append((ch, col))
                 w += cw
                 continue
-            # the last space that has at least one letter or digit to its left
-            # (so a dialogue dash is not left alone on a row)
+            # последний пробел, левее которого есть хоть одна буква/цифра
+            # (чтобы «—» диалога не оставалось на строке одно)
             sp = max((k for k, (c, _) in enumerate(cur)
                       if c in ' \u3000' and any(x.isalnum() for x, _ in cur[:k])), default=None)
             in_word = _word_char(ch) and _word_char(cur[-1][0])
@@ -843,14 +787,14 @@ def _greedy(chars, cs, target, nlines, small=False):
                 lines.append(cur[:sp])
                 cur = cur[sp + 1:]
             elif in_word and w + cw <= MAX_HALF:
-                cur.append((ch, col))          # stretch the word to the row edge
+                cur.append((ch, col))          # дотягиваем слово до края строки
                 w += cw
                 continue
             elif ch in NO_LINE_START and len(cur) > 1:
                 lines.append(cur[:-1])
                 cur = cur[-1:]
             else:
-                lines.append(cur)              # word longer than a row: cut it
+                lines.append(cur)              # слово длиннее строки — режем
                 cur = []
             w = sum(width(c) for c, _ in cur)
         if not cur and ch in ' \u3000':
@@ -859,7 +803,7 @@ def _greedy(chars, cs, target, nlines, small=False):
         w += cw
     if cur:
         lines.append(cur)
-    # an opening bracket or quote must not stay at the end of a row
+    # открывающая скобка/кавычка не должна оставаться в конце строки
     for k in range(len(lines) - 1):
         while len(lines[k]) > 1 and lines[k][-1][0] in NO_LINE_END:
             lines[k + 1].insert(0, lines[k].pop())
@@ -867,9 +811,9 @@ def _greedy(chars, cs, target, nlines, small=False):
 
 
 def wrap_line(spans, cs, small=False):
-    """spans: [(text, color)] -> rows of [(char, color)] no wider than 15
-    full-width glyphs. Rows are balanced (as on air); Japanese text wraps by
-    glyph with the kinsoku rules, alphabetic text only at spaces."""
+    """spans: [(text, color)] -> строки [(char, color)] не шире 15 полноширинных
+    знаков. Строки выравниваются по длине (как в вещании); японский текст
+    переносится по знакам с учётом 、。」, алфавитный — только по пробелам."""
     chars = [(ch, col) for text, col in spans for ch in text]
     while chars and chars[-1][0] in ' \u3000':
         chars.pop()
@@ -882,18 +826,18 @@ def wrap_line(spans, cs, small=False):
     for target in range(-(-total // max(k, 1)), MAX_HALF):
         lines = [ln for ln in _greedy(chars, cs, target, k, small) if ln]
         if len(lines) <= k:
-            return lines                       # the most even rows for that row count
+            return lines                       # самые ровные строки при том же их числе
     return base
 
 
 def layout_srt(sub, cs, warn):
-    """An SRT cue -> [(x, y, small, [(char, color)])], centred, bottom or top."""
+    """SRT-фраза -> [(x, y, small, [(char, color)])] — по центру, снизу или сверху."""
     lines = []
     for spans in sub['lines']:
         lines.extend(wrap_line(spans, cs))
     lines = [ln for ln in lines if ln]
     if len(lines) > MAX_LINES:
-        warn('more than %d rows, the extra ones were dropped' % MAX_LINES)
+        warn('больше %d строк, лишние отброшены' % MAX_LINES)
         lines = lines[-MAX_LINES:]
     placed = []
     n = len(lines)
@@ -909,7 +853,7 @@ def layout_srt(sub, cs, warn):
 
 
 def build_statement(sub, cs, warn, lang_tag=0):
-    """A cue (SRT) or a screen (ASS) -> caption_statement_data (a data group)."""
+    """Фраза (SRT) или экран (ASS) -> caption_statement_data (data_group)."""
     placed = sub['placed'] if 'placed' in sub else layout_srt(sub, cs, warn)
     body = StatementBody(cs, warn)
     body.csi([PLANE_SWF], 0x53)                   # SWF
@@ -920,33 +864,33 @@ def build_statement(sub, cs, warn, lang_tag=0):
     body.csi([CHAR_W, CHAR_H], 0x57)              # SSM
     for i, (x, y, small, line) in enumerate(placed):
         if POSITIONING == 'aps':
-            # APS (0x1C): row/column in cells of the current size from the SDP corner.
-            # Verified on hardware: the deck counts ACPS from the area corner too (+170,+30),
-            # while libaribcaption counts from the screen corner; both agree on APS.
+            # APS (0x1C): строка/столбец в клетках текущего размера от угла области SDP.
+            # Проверено на железе: дека считает и ACPS от угла области (+170,+30),
+            # а libaribcaption — от угла экрана; APS оба понимают одинаково.
             unit_y = 30 if small else 60
-            body.set_size(SSZ if small else MSZ)      # MSZ cell is 20x60, SSZ is 20x30
+            body.set_size(SSZ if small else MSZ)      # клетка MSZ = 20x60, SSZ = 20x30
             body.buf += bytes((APS, 0x40 + (y + 1 - AREA_Y) // unit_y - 1, 0x40 + (x - AREA_X) // 20))  # APS — C0
         else:
             body.csi([x, y], 0x61)                # ACPS
         if i == 0:
-            body.c1(COL); body.buf += b'\x20\x44'            # box: palette 4, colour 1 (black 50%)
+            body.c1(COL); body.buf += b'\x20\x44'            # подложка: палитра 4, цвет 1 (чёрный 50%)
             body.c1(COL); body.buf += b'\x51'
-            body.c1(COL); body.buf += b'\x20\x40'            # back to palette 0 for the text colour
+            body.c1(COL); body.buf += b'\x20\x40'            # назад на палитру 0 для цвета текста
         for ch, col in line:
             body.set_fg(col)
             body.put(ch, small)
     text = body.finish()
     units = [data_unit(0x20, bytes((CS,)))]
     if body.drcs_unit():
-        units.append(body.drcs_unit())                 # DRCS before the text, as on air
+        units.append(body.drcs_unit())                 # DRCS перед текстом, как в эфире
     units.append(data_unit(0x20, text))
     return caption_statement_data(units, lang_tag)
 
 
 def arib_string(text, cs, warn=log):
-    """Text -> an ARIB STD-B24 string for SI (service_descriptor, short_event...).
-    The default SI state is GL=G0 (Kanji) at normal size."""
-    body = StatementBody(cs, warn, allow_drcs=False)   # SI never carries DRCS
+    """Текст -> строка ARIB STD-B24 для SI (service_descriptor, short_event...).
+    Состояние по умолчанию в SI: GL=G0 (Кандзи), нормальный размер."""
+    body = StatementBody(cs, warn, allow_drcs=False)   # DRCS в SI не бывает
     body.size = NSZ
     body.si_style = True
     for ch in cs.normalize(text, allow_drcs=False):
@@ -961,8 +905,8 @@ def service_descriptor(name, provider, cs, service_type=0x01):
 
 
 def arib_string_fit(text, cs, limit, warn=log):
-    """An ARIB string no longer than limit bytes; cut at glyph boundaries, never
-    inside a two-byte code or a control sequence. -> (bytes, remainder)."""
+    """Строка ARIB не длиннее limit байт; обрезается по знакам, а не посреди
+    двухбайтного кода или управляющей последовательности. -> (байты, остаток)."""
     body = StatementBody(cs, warn, allow_drcs=False)
     body.size = NSZ
     body.si_style = True
@@ -976,9 +920,9 @@ def arib_string_fit(text, cs, limit, warn=log):
 
 
 def short_event_descriptor(name, text, cs, lang=b'jpn'):
-    """Title and short description. The descriptor length is a single byte, so
-    the body must fit in 255: the title wins and the tail of the description
-    moves into extended_event_descriptors."""
+    """Название и короткое описание. Длина дескриптора — один байт, поэтому
+    тело обязано уложиться в 255: имя в приоритете, хвост описания уходит
+    в extended_event_descriptors."""
     n, _ = arib_string_fit(name, cs, 200)
     t, _rest = arib_string_fit(text, cs, 255 - len(lang) - 2 - len(n))
     body = lang + bytes((len(n),)) + n + bytes((len(t),)) + t
@@ -986,15 +930,15 @@ def short_event_descriptor(name, text, cs, lang=b'jpn'):
 
 
 def short_event_text_tail(name, text, cs, lang=b'jpn'):
-    """The part of the description that did not fit into short_event_descriptor."""
+    """Часть описания, не поместившаяся в short_event_descriptor."""
     n, _ = arib_string_fit(name, cs, 200)
     _t, rest = arib_string_fit(text, cs, 255 - len(lang) - 2 - len(n))
     return rest
 
 
 def extended_event_descriptors(text, cs, lang=b'jpn', max_parts=16):
-    """A long event description: a chain of 0x4E descriptors, as in a broadcast EIT.
-    Each carries its own number, the last number, an empty item list and text."""
+    """Длинное описание передачи: цепочка дескрипторов 0x4E, как в эфирном EIT.
+    В каждом — номер части, номер последней, пустой список позиций и текст."""
     parts, rest = [], text
     while rest and len(parts) < max_parts:
         chunk, rest = arib_string_fit(rest, cs, 255 - len(lang) - 3)
@@ -1014,11 +958,11 @@ def build_clear_statement(lang_tag=0):
 
 
 # ---------------------------------------------------------------------------
-# TS: packets, sections, PES
+# TS: пакеты, секции, PES
 # ---------------------------------------------------------------------------
 
 class CC:
-    """Continuity counters for the PIDs we generate ourselves."""
+    """Счётчики непрерывности для PID, которые генерируем сами."""
 
     def __init__(self):
         self.cc = {}
@@ -1219,7 +1163,7 @@ def pes_pts(payload):
 
 
 def iter_packets(path, limit_bytes=None, from_end=None):
-    """Yields 188-byte packets; understands 188/192(TTS)/204(RS) and junk at the start."""
+    """Отдаёт 188-байтные пакеты; понимает 188/192(TTS)/204(RS) и мусор в начале."""
     with open(path, 'rb') as f:
         head = f.read(204 * 8)
         size, start = None, None
@@ -1232,7 +1176,7 @@ def iter_packets(path, limit_bytes=None, from_end=None):
             if size:
                 break
         if size is None:
-            raise SystemExit('no 0x47 sync byte found: is this really MPEG-TS?')
+            raise SystemExit('не найден синхробайт 0x47: это не MPEG-TS?')
         tso = 4 if size == 192 else 0
         if from_end:
             import os
@@ -1253,7 +1197,7 @@ def iter_packets(path, limit_bytes=None, from_end=None):
             while i < n:
                 o = i * size + tso
                 if data[o] != 0x47:
-                    # lost sync: look for the next 0x47
+                    # потеря синхронизации: ищем следующий 0x47
                     j = data.find(b'\x47', o + 1)
                     while j != -1 and j + size * 2 < len(data) and not (data[j + size] == 0x47):
                         j = data.find(b'\x47', j + 1)
@@ -1325,20 +1269,20 @@ def parse_srt(path, cs):
 
 
 # ---------------------------------------------------------------------------
-# ASS/SSA: everything ARIB STD-B24 can express is carried over, the rest is skipped
+# ASS/SSA: всё, что ARIB STD-B24 умеет, переносим; остальное пропускаем
 # ---------------------------------------------------------------------------
 #
-# Carried over: text, \N, \h, \q2, alignment (\an, \a, style), position
-#   (\pos; for \move the start point), MarginL/R/V, primary colour
-#   (\c, \1c, \r, style) -> 8 ARIB colours, size (\fs, style) -> normal
-#   NSZ or small SSZ, an alpha of \alpha/\1a = FF -> the text is not shown.
-# Skipped: drawings \p1.., rotation \frz/\frx/\fry, scaling \fscx/\fscy,
-#   shear \fax/\fay, letter spacing \fsp, animation \t, movement \move,
-#   fades \fad/\fade, border/shadow/blur, \clip, \org, fonts \fn,
-#   bold/italic/underline, karaoke \k, the Effect field, unknown tags.
-# ARIB shows one screen at a time, so simultaneous events are composed onto
-# a single screen and per-frame duplicated signs (tracking) are collapsed
-# into one static sign.
+# Переносится: текст, \N, \h, \q2, выравнивание (\an, \a, стиль), позиция
+#   (\pos; у \move — начальная точка), поля MarginL/R/V, основной цвет
+#   (\c, \1c, \r, стиль) -> 8 цветов ARIB, размер (\fs, стиль) -> обычный
+#   NSZ или малый SSZ, прозрачность \alpha/\1a = FF -> текст не показывается.
+# Пропускается: рисунки \p1.., повороты \frz/\frx/\fry, масштаб \fscx/\fscy,
+#   наклон \fax/\fay, межбуквенный \fsp, анимации \t, движение \move,
+#   затухание \fad/\fade, обводка/тень/размытие, \clip, \org, шрифты \fn,
+#   жирный/курсив/подчёркивание, караоке \k, поле Effect, неизвестные теги.
+# ARIB показывает один «экран» за раз, поэтому одновременные события
+# компонуются в один экран, а покадрово размноженные надписи (трекинг)
+# склеиваются в одну статичную.
 
 ASS_TAG_NAMES = sorted([
     'xbord', 'ybord', 'xshad', 'yshad', 'iclip', 'alpha', 'blur', 'bord', 'shad',
@@ -1347,31 +1291,31 @@ ASS_TAG_NAMES = sorted([
     '1c', '2c', '3c', '4c', '1a', '2a', '3a', '4a',
     'a', 'b', 'c', 'i', 'k', 'K', 'p', 'q', 'r', 's', 't', 'u'], key=len, reverse=True)
 
-GRID_COLS = AREA_W // 20      # 31 half cells of 20 dots
-GRID_ROWS = AREA_H // 30      # 16 half rows of 30 dots (an NSZ row is 2, SSZ is 1)
+GRID_COLS = AREA_W // 20      # 31 полуклетка по 20 точек
+GRID_ROWS = AREA_H // 30      # 16 полустрок по 30 точек (строка NSZ = 2, SSZ = 1)
 
 
 ASS_SIGN_WORDS = {'sign', 'signs', 'ts', 'typeset', 'typesetting', 'screen', 'note', 'notes', 'title', 'titles',
                   'logo', 'eyecatch', 'preview', 'next', 'credit', 'credits', 'staff', 'caption', 'captions',
-                  'nadpis', 'nadpisi', 'primechanie', 'primechaniya', 'prim', 'titr', 'titry', 'logo', 'anons',
-                  'zagolovok', 'podpis', 'podpisi', 'vyveska', 'vyveski'}
+                  'надпись', 'надписи', 'примечание', 'примечания', 'прим', 'титр', 'титры', 'лого', 'анонс',
+                  'заголовок', 'подпись', 'подписи', 'вывеска', 'вывески'}
 ASS_SONG_WORDS = {'op', 'ed', 'opening', 'ending', 'song', 'songs', 'insert', 'kara', 'karaoke', 'lyrics', 'lyric',
-                  'romaji', 'kanji', 'opening_ru', 'ending_ru', 'pesnya', 'pesni', 'karaoke_ru', 'romadzi'}
-ASS_SUBSTR = {'sign': 'signs', 'nadpis': 'signs', 'typeset': 'signs', 'karaoke': 'song', 'karaoke_ru': 'song',
-              'opening': 'song', 'ending': 'song', 'lyric': 'song', 'romaji': 'song'}
+                  'romaji', 'kanji', 'опенинг', 'эндинг', 'песня', 'песни', 'караоке', 'ромадзи'}
+ASS_SUBSTR = {'sign': 'надписи', 'надпис': 'надписи', 'typeset': 'надписи', 'karaoke': 'песня', 'караоке': 'песня',
+              'opening': 'песня', 'ending': 'песня', 'lyric': 'песня', 'romaji': 'песня'}
 ASS_EVENT_SIGN_FEATURES = ('drawing', 'karaoke', 'effect', 'actor', 'rotation', 'clip', 'org', 'shear', 'move', 'pos')
 
 
 def ass_name_kind(name):
-    """'signs' / 'song' / None from a style or actor name (FrierenSigns, OP_Romaji...)."""
+    """'надписи' / 'песня' / None по имени стиля или актёра (FrierenSigns, OP_Romaji, Надписи...)."""
     if not name:
         return None
-    spaced = re.sub(r'([a-z\u0430-\u044f\u0451])([A-Z\u0410-\u042f\u0401])', r'\1 \2', name)
-    tokens = set(re.split(r'[^0-9a-z\u0430-\u044f\u0451]+', spaced.lower()))
+    spaced = re.sub(r'([a-zа-яё])([A-ZА-ЯЁ])', r'\1 \2', name)
+    tokens = set(re.split(r'[^0-9a-zа-яё]+', spaced.lower()))
     if tokens & ASS_SONG_WORDS:
-        return 'song'
+        return 'песня'
     if tokens & ASS_SIGN_WORDS:
-        return 'signs'
+        return 'надписи'
     low = name.lower()
     for sub, kind in ASS_SUBSTR.items():
         if sub in low:
@@ -1380,7 +1324,7 @@ def ass_name_kind(name):
 
 
 def classify_ass_styles(style_stats, only_styles, skip_styles):
-    """Style -> (is it dialogue?, reason)."""
+    """Стиль -> (реплики?, причина)."""
     out = {}
     for name, c in style_stats.items():
         total = max(1, c['total'])
@@ -1390,28 +1334,28 @@ def classify_ass_styles(style_stats, only_styles, skip_styles):
         elif only_styles:
             out[name] = (name in only_styles, '--ass-only-styles')
         elif ass_name_kind(name):
-            out[name] = (False, 'by name: %s' % ass_name_kind(name))
+            out[name] = (False, 'по имени: %s' % ass_name_kind(name))
         elif c['karaoke'] >= 0.3 * total:
-            out[name] = (False, 'karaoke \\k: song')
+            out[name] = (False, 'караоке \\k: песня')
         elif plain >= 0.7 or (c['plain'] >= 20 and plain >= 0.4):
-            # signs inside a dialogue style are dropped one by one, so a style with
-            # many plain lines is dialogue even if it also carries many signs
-            out[name] = (True, 'plain text %d%%' % round(plain * 100))
+            # надписи внутри стиля реплик отсекаются поштучно, поэтому стиль с
+            # большим числом обычных строк — реплики, даже если в нём много надписей
+            out[name] = (True, 'обычный текст %d%%' % round(plain * 100))
         else:
             top = max((f for f in ASS_EVENT_SIGN_FEATURES), key=lambda f: c[f])
-            out[name] = (False, 'signs: %s in %d%% of events' % ({
+            out[name] = (False, 'надписи: %s в %d%% событий' % ({
                 'pos': '\\pos', 'move': '\\move', 'karaoke': '\\k', 'clip': '\\clip', 'org': '\\org',
-                'rotation': 'rotation', 'shear': 'shear', 'drawing': 'drawings', 'effect': 'Effect',
-                'actor': 'a "sign" Name'}[top], round(c[top] / total * 100)))
+                'rotation': 'поворот', 'shear': 'наклон', 'drawing': 'рисунки', 'effect': 'Effect',
+                'actor': 'имя «надпись»'}[top], round(c[top] / total * 100)))
     return out
 
 
 def print_ass_styles(style_stats, verdicts, samples):
-    log('%-22s %6s %7s  %-9s %s' % ('Style', 'events', 'plain', 'verdict', 'reason / sample'))
+    log('%-22s %6s %7s  %-9s %s' % ('Стиль', 'событ.', 'обычн.', 'решение', 'причина / пример'))
     for name, c in sorted(style_stats.items(), key=lambda kv: -kv[1]['total']):
         ok, why = verdicts[name]
         log('%-22s %6d %6d%%  %-9s %s%s' % (name[:22], c['total'], round(100 * c['plain'] / max(1, c['total'])),
-                                           'dialogue' if ok else 'skipped', why,
+                                           'реплики' if ok else 'пропуск', why,
                                            ('  «%s»' % samples.get(name, '')[:40]) if samples.get(name) else ''))
 
 
@@ -1421,7 +1365,7 @@ def ass_time(v):
 
 
 def ass_color(v, default=(255, 255, 255, 0)):
-    """'&HAABBGGRR' / '&HBBGGRR&' / decimal (SSA) -> (r, g, b, alpha)."""
+    """'&HAABBGGRR' / '&HBBGGRR&' / десятичное (SSA) -> (r, g, b, alpha)."""
     v = v.strip()
     try:
         if v[:2].upper() == '&H' or v[:1].upper() == 'H':
@@ -1441,7 +1385,7 @@ def ass_alpha(v):
 
 
 def rgb_to_arib_on_dark(rgb):
-    """Nearest of the 8 colours; black and blue are unreadable on the dark box."""
+    """Ближайший из 8 цветов; чёрный и синий на тёмной подложке не читаются."""
     code = min(ARIB_COLORS, key=lambda c: sum((a - b) ** 2 for a, b in zip(c[0], rgb[:3])))[1]
     return {BKF: WHF, BLF: CNF}.get(code, code)
 
@@ -1494,27 +1438,27 @@ class AssStats:
 
     def report(self):
         d = self.dropped
-        log('ASS: %d events, %d shown after merging' % (self.info['events'], self.info['kept']))
+        log('ASS: событий %d, показано после склейки %d' % (self.info['events'], self.info['kept']))
         if self.info['clustered_from']:
-            log('  sign lines grouped into blocks: %d -> %d' % (self.info['clustered_from'], self.info['clustered_to']))
+            log('  строки надписей собраны в блоки: %d -> %d' % (self.info['clustered_from'], self.info['clustered_to']))
         if self.info['merged_from']:
-            log('  per-frame signs: %d events collapsed into %d static ones'
+            log('  покадровые надписи: %d событий склеены в %d статичных'
                 % (self.info['merged_from'], self.info['merged_to']))
-        parts = [('non-dialogue styles', 'not_dialogue_style'), ('signs/karaoke inside a dialogue style', 'sign_in_dialogue_style'),
-                 ('drawings \\p', 'drawing'), ('invisible (alpha FF)', 'invisible'), ('empty', 'empty'),
-                 ('duplicates', 'duplicate'), ('Comment', 'comment'), ('style filtered out', 'style'),
-                 ('signs (--ass-signs skip)', 'sign')]
+        parts = [('стили не-реплик', 'not_dialogue_style'), ('надписи/караоке в стиле реплик', 'sign_in_dialogue_style'),
+                 ('рисунки \\p', 'drawing'), ('невидимые (alpha FF)', 'invisible'), ('пустые', 'empty'),
+                 ('дубликаты', 'duplicate'), ('Comment', 'comment'), ('стиль отфильтрован', 'style'),
+                 ('надписи (--ass-signs skip)', 'sign')]
         txt = ', '.join('%s %d' % (label, d[k]) for label, k in parts if d[k])
         if txt:
-            log('  skipped: ' + txt)
+            log('  пропущено: ' + txt)
         if self.ignored:
-            log('  tags ignored: ' + ', '.join(
+            log('  проигнорированы теги: ' + ', '.join(
                 '\\%s×%d' % (k, v) for k, v in self.ignored.most_common()))
         if d['no_space']:
-            log('  no room left on screen: %d blocks (too much text at once)' % d['no_space'])
+            log('  не хватило места на экране: %d блоков (одновременно слишком много текста)' % d['no_space'])
         if d['short']:
-            log('  screens shorter than --ass-min-duration: %d (merged into the previous one)' % d['short'])
-        log('  ARIB screens: %d' % self.info['screens'])
+            log('  экранов короче --ass-min-duration: %d (поглощены соседними)' % d['short'])
+        log('  экранов ARIB: %d' % self.info['screens'])
 
 
 def parse_ass(path, cs, args):
@@ -1573,7 +1517,7 @@ def parse_ass(path, cs, args):
 
     def style_align(st):
         a = int(num(st.get('alignment'), 2))
-        if legacy:                                   # SSA: 1-3 bottom, 5-7 top, 9-11 middle
+        if legacy:                                   # SSA: 1-3 низ, 5-7 верх, 9-11 середина
             a = (a & 3 or 2) + (6 if a & 4 else 3 if a & 8 else 0)
         return a if 1 <= a <= 9 else 2
 
@@ -1633,7 +1577,7 @@ def parse_ass(path, cs, args):
                         q = int(num(arg, wrapstyle))
                     else:
                         if name in ('frz', 'fr') and frz is None:
-                            frz = num(arg, 0)       # not drawn, but needed to order the lines of a sign
+                            frz = num(arg, 0)       # не рисуем, но нужен для порядка строк надписи
                         if name in ('k', 'K', 'kf', 'ko'):
                             feat.add('karaoke')
                         elif name in ('clip', 'iclip'):
@@ -1663,7 +1607,7 @@ def parse_ass(path, cs, args):
                 runs.append((chunk, rgb_to_arib_on_dark(rgb)))
                 if run_fs is None and chunk.strip():
                     run_fs = fs
-        # --- "sign" traits of the event and per-style statistics ---
+        # --- признаки «надписи» у события и статистика по стилю ---
         align0 = an or style_align(st)
         if pos is not None:
             ml0, mr0, mv0 = (max(int(num(ev.get(k), 0)) or int(num(st.get(k), 0)), 0) for k in ('marginl', 'marginr', 'marginv'))
@@ -1671,7 +1615,7 @@ def parse_ass(path, cs, args):
             dx = ml0 if h0 == 0 else prx - mr0 if h0 == 2 else (prx + ml0 - mr0) / 2
             dy = pry - mv0 if v0 == 0 else mv0 if v0 == 2 else pry / 2
             if abs(pos[0] - dx) > prx * 0.05 or abs(pos[1] - dy) > pry * 0.05:
-                feat.add('pos')                          # \pos at the style's own anchor is not a sign
+                feat.add('pos')                          # \pos в точке стиля по умолчанию надписью не считаем
         effect = ev.get('effect', '').strip().lower()
         if effect.startswith(('fx', 'karaoke', 'template', 'code', 'banner', 'scroll')):
             feat.add('effect')
@@ -1696,7 +1640,7 @@ def parse_ass(path, cs, args):
                 if part:
                     cur.append((part, col))
         lines.append(cur)
-        for ln in lines:                              # trim spaces at the row edges
+        for ln in lines:                              # пробелы по краям строки не нужны
             while ln and not ln[0][0].lstrip(' '):
                 ln.pop(0)
             if ln:
@@ -1725,7 +1669,7 @@ def parse_ass(path, cs, args):
         align = an or style_align(st)
         ml, mr, mv = (int(num(ev.get(k), 0)) or int(num(st.get(k), 0)) for k in ('marginl', 'marginr', 'marginv'))
         ml, mr, mv = max(ml, 0), max(mr, 0), max(mv, 0)
-        h, v = (align - 1) % 3, (align - 1) // 3        # h: 0 left 1 centre 2 right; v: 0 bottom 1 middle 2 top
+        h, v = (align - 1) % 3, (align - 1) // 3        # h: 0 лево 1 центр 2 право; v: 0 низ 1 середина 2 верх
         if pos is None:
             x = ml if h == 0 else prx - mr if h == 2 else (prx + ml - mr) / 2
             y = pry - mv if v == 0 else mv if v == 2 else pry / 2
@@ -1756,7 +1700,7 @@ def parse_ass(path, cs, args):
                 it['positioned'] = False
                 kept.append(it)
         items = kept
-        log('ASS, dialogue only -- styles:')
+        log('ASS, только реплики — стили:')
         print_ass_styles(style_stats, verdicts, style_samples)
     items = [it for it in items if it['end'] > it['start']]
     items = merge_tracked(items, stats)
@@ -1774,8 +1718,8 @@ def _item_key(it):
 
 
 def merge_tracked(items, stats):
-    """Merges per-frame copies (same text and style, adjacent in time) into one
-    event; the position becomes the median. Exact duplicates are dropped."""
+    """Склеивает покадровые копии (одинаковый текст/стиль, стык по времени)
+    в одно событие; позиция — медианная. Убирает точные дубликаты."""
     items.sort(key=lambda it: (it['start'], it['order']))
     open_by_key, out = {}, []
     for it in items:
@@ -1783,7 +1727,7 @@ def merge_tracked(items, stats):
         prev = open_by_key.get(key)
         if prev is not None and it['start'] - prev['end'] <= 0.1 and it['start'] >= prev['start']:
             if it['start'] == prev['start'] and it['end'] == prev['end'] and not prev['_xs'][1:]:
-                stats.dropped['duplicate'] += 1           # same text at the same time (two layers, say)
+                stats.dropped['duplicate'] += 1           # тот же текст в то же время (например, два слоя)
                 continue
             prev['end'] = max(prev['end'], it['end'])
             prev['_xs'].append(it['x'])
@@ -1803,7 +1747,7 @@ def merge_tracked(items, stats):
 
 
 def _block(it, cs):
-    """An event -> a block: rows, widths, size in grid cells and the anchor."""
+    """Событие -> блок: строки, ширины, размер в клетках сетки и якорь."""
     small = it['small']
     unit = 1 if small else 2
     width = (lambda c: 1) if small else cs.width
@@ -1819,7 +1763,7 @@ def _block(it, cs):
     c0 = min(max(c_raw, 0), GRID_COLS - w)
     r0 = round(it['y'] / 30 - (hgt, hgt / 2, 0)[it['v']])
     if unit == 2:
-        r0 -= r0 % 2                     # normal size sits only on the 60-dot row grid (for APS)
+        r0 -= r0 % 2                     # обычный размер — только на сетке строк 60 точек (для APS)
     return {'it': it, 'lines': lines, 'lw': lw, 'w': w, 'hgt': hgt, 'unit': unit, 'c': c0, 'r': r0,
             'c_raw': c_raw, 'ax': round(it['x'] / 20)}
 
@@ -1839,9 +1783,9 @@ def _occupy(grid, b, placed):
 
 
 def cluster_signs(items, stats):
-    """The lines of one sign (often separate \\pos events) are grouped into a
-    single block. Line order follows the normal of the rotated (\\frz) line;
-    neighbours must be within about two line spacings."""
+    """Строки одной надписи (часто это отдельные события с \\pos) собираются
+    в один блок. Порядок строк — вдоль нормали к повёрнутой (\\frz) строке,
+    соседние строки не дальше ~2 межстрочных интервалов."""
     out = [it for it in items if not it['positioned']]
     groups = collections.defaultdict(list)
     for it in items:
@@ -1868,7 +1812,7 @@ def cluster_signs(items, stats):
             merged = dict(first)
             merged['lines'] = [ln for i in c for ln in i['lines']]
             merged['y'] = first['y'] - (first['fsz'], first['fsz'] / 2, 0)[first['v']]
-            merged['v'] = 2                            # anchor at the top of the first line
+            merged['v'] = 2                            # якорь — верх первой строки
             stats.info['clustered_from'] += len(c)
             stats.info['clustered_to'] += 1
             out.append(merged)
@@ -1877,10 +1821,10 @@ def cluster_signs(items, stats):
 
 
 def layout_screen(active, cs, stats):
-    """Places simultaneous events on the 31x16 grid without overlaps: plain
-    events first (dialogue; identically aligned ones stack, as in libass),
-    then positioned signs as a group that keeps its internal layout; if it
-    clashes with dialogue the whole group is shifted."""
+    """Размещает одновременные события в сетке 31x16 без наложений:
+    сначала обычные (диалог; одинаково выровненные стопкой, как в libass),
+    затем позиционированные надписи — группой, с сохранением их взаимного
+    расположения; при конфликте с диалогом группа сдвигается целиком."""
     grid = [[False] * GRID_COLS for _ in range(GRID_ROWS)]
     placed = []
     normal = sorted((it for it in active if not it['positioned']), key=lambda it: (it['start'], it['order']))
@@ -1890,7 +1834,7 @@ def layout_screen(active, cs, stats):
         if b is None:
             continue
         r0 = min(max(b['r'], 0), GRID_ROWS - b['hgt'])
-        step = (-1 if it['v'] == 0 else 1) * b['unit']   # bottom stacks upward, top downward
+        step = (-1 if it['v'] == 0 else 1) * b['unit']   # снизу — стопка вверх, сверху — вниз
         row = next((r for d in range(GRID_ROWS) for r in ((r0 + step * d, r0 - step * d) if d else (r0,))
                     if _free(grid, r, b)), None)
         if row is None:
@@ -1899,8 +1843,8 @@ def layout_screen(active, cs, stats):
         b['r'] = row
         _occupy(grid, b, placed)
     blocks = [b for b in (_block(it, cs) for it in signs) if b]
-    # neighbouring signs with the same alignment (the lines of one card, say)
-    # are pushed off the screen edge together so the alignment survives
+    # соседние надписи с одинаковым выравниванием (например, строки одной
+    # карточки) сдвигаем от края экрана вместе, чтобы не рассыпать выравнивание
     for b in blocks:
         cluster = [o for o in blocks if o['it']['h'] == b['it']['h'] and abs(o['ax'] - b['ax']) <= 8]
         over = max(o['c_raw'] + o['w'] - GRID_COLS for o in cluster)
@@ -1909,7 +1853,7 @@ def layout_screen(active, cs, stats):
         b['c'] = min(max(b['c_raw'] - shift, 0), GRID_COLS - b['w'])
     blocks.sort(key=lambda b: (b['r'], b['c'], -b['it']['layer'], b['it']['order']))
     group = []
-    for b in blocks:                                # push signs down without reordering
+    for b in blocks:                                # раздвигаем надписи вниз, не меняя порядок
         while any(g['r'] < b['r'] + b['hgt'] and b['r'] < g['r'] + g['hgt'] and
                   g['c'] < b['c'] + b['w'] and b['c'] < g['c'] + g['w'] for g in group):
             b['r'] += b['unit']
@@ -1919,12 +1863,12 @@ def layout_screen(active, cs, stats):
         bottom = max(b['r'] + b['hgt'] for b in group)
         if bottom - top <= GRID_ROWS:
             break
-        group.pop()                                 # the group is taller than the screen: drop the last ones
+        group.pop()                                 # группа выше экрана — жертвуем последними
         stats.dropped['no_space'] += 1
     if group:
         top = min(b['r'] for b in group)
         bottom = max(b['r'] + b['hgt'] for b in group)
-        lo, hi = -top, GRID_ROWS - bottom           # the shifts the whole group may take
+        lo, hi = -top, GRID_ROWS - bottom           # допустимые сдвиги всей группы
         base = min(max(0, lo), hi)
         even = any(b['unit'] == 2 for b in group)
         for d in sorted(range(lo, hi + 1), key=lambda d: (abs(d - base), d > base)):
@@ -1936,7 +1880,7 @@ def layout_screen(active, cs, stats):
                     _occupy(grid, b, placed)
                 group = []
                 break
-        for b in group:                             # it does not fit as a whole: place one by one
+        for b in group:                             # целиком не влезла — по одной
             r0 = min(max(b['r'], 0), GRID_ROWS - b['hgt'])
             u = b['unit']
             row = next((r for d in range(GRID_ROWS) for r in ((r0 - d * u, r0 + d * u) if d else (r0,))
@@ -1967,7 +1911,7 @@ def compose_screens(items, cs, args, stats):
             screens[-1]['end'] = b
             continue
         screens.append({'start': a, 'end': b, 'placed': placed})
-    # short screens (row joins, sign tails) are merged into the previous one
+    # короткие экраны (стыки строк, хвосты надписей) поглощаются предыдущим
     out = []
     for sc in screens:
         if sc['end'] - sc['start'] < args.ass_min_duration:
@@ -1983,45 +1927,45 @@ def compose_screens(items, cs, args, stats):
 
 
 # ---------------------------------------------------------------------------
-# Copy control: digital_copy_control (0xC1) and content_availability (0xDE)
+# Управление копированием: digital_copy_control (0xC1) и content_availability (0xDE)
 # ---------------------------------------------------------------------------
 #
-# 0xC1 (ARIB STD-B10): digital_recording_control_data in the top two bits is
-# what the receiver reads when deciding whether D-VHS recording over i.LINK is
-# allowed. 0xDE, content_availability, limits the output and temporary storage.
-# Values are carried over from the input as they are; the options below change them.
-# On a real i.LINK link DTCP encryption sits on top and the mode on the bus is
-# set by the sending device, so the bits in the stream are signalling, not the
-# protection itself. On an off-air recording they reflect the broadcaster's terms.
+# 0xC1 (ARIB STD-B10): digital_recording_control_data в старших двух битах —
+# именно его смотрит приёмник, решая, можно ли писать на D-VHS по i.LINK.
+# 0xDE: content_availability — ограничения на выход и «временную» запись.
+# Значения переносятся из входного потока как есть; ключи ниже их меняют.
+# На реальном i.LINK поверх этого работает шифрование DTCP, и режим на шине
+# задаёт передающее устройство, так что биты в потоке — это сигнализация,
+# а не сама защита. Для записи, снятой из эфира, они отражают условия вещателя.
 
-# The low 4 bits of 0xC1 are called user_defined in the standard, but the ARIB
-# operational rules give them meaning: the upper two are copy_control_type (how
-# to hand the content out) and the lower two are APS_control_data (analogue
-# output protection). A copy_control_type of 00 is undefined and receivers treat
-# it as the strictest mode, which is why "copy free" with a zero nibble behaves
-# like "copy never".
-CCT_NAMES = {0b00: 'undefined (the receiver treats the content as protected)',
-             0b01: 'output is encrypted (DTCP)',
-             0b10: 'reserved',
-             0b11: 'output without encryption'}
+# Младшие 4 бита дескриптора 0xC1 в стандарте названы user_defined, но
+# эксплуатационные правила ARIB задают их смысл: старшие два — copy_control_type
+# (как выдавать наружу), младшие два — APS_control_data (защита аналогового
+# выхода). Значение 00 у copy_control_type не определено, и приёмник трактует
+# его как самый строгий режим — поэтому «copy free» с нулевым нибблом ведёт
+# себя как «копирование запрещено».
+CCT_NAMES = {0b00: 'не задан (приёмник считает содержимое защищённым)',
+             0b01: 'выход шифруется (DTCP)',
+             0b10: 'зарезервировано',
+             0b11: 'выход без шифрования'}
 CCT_ARG = {'auto': None, 'protected': 0b01, 'free': 0b11, '00': 0b00, '01': 0b01, '10': 0b10, '11': 0b11}
 
-DRC_NAMES = {0b00: 'copy free',
-             0b01: 'defined by the broadcaster',
-             0b10: 'copy one generation',
-             0b11: 'copy never'}
+DRC_NAMES = {0b00: 'копирование свободно (制限なし)',
+             0b01: 'по усмотрению вещателя',
+             0b10: 'одна копия (一世代のみ)',
+             0b11: 'копирование запрещено (複製禁止)'}
 COPY_ARG = {'free': 0b00, 'broadcaster': 0b01, 'once': 0b10, 'never': 0b11,
             '00': 0b00, '01': 0b01, '10': 0b10, '11': 0b11}
 
 
-EPN_CONTENT_AVAILABILITY = 0xEE   # like the broadcaster's 0xEF but with encryption_mode = 0
+EPN_CONTENT_AVAILABILITY = 0xEE   # как 0xEF у вещателя, но encryption_mode = 0
 
 
 def apply_epn(a):
-    """--epn: "copy freely but hand it out protected" (EPN). copy_control_type
-    alone is not enough: output protection is switched on by encryption_mode = 0
-    in descriptor 0xDE, and without it the receiver hands the stream out in the
-    clear -- verified on a Victor HM-DHX1."""
+    """--epn: «копируй свободно, но выдавай под защитой» (EPN). Одного
+    copy_control_type для этого мало: защиту выхода включает бит
+    encryption_mode = 0 в дескрипторе 0xDE, и без него приёмник отдаёт
+    поток в открытом виде — проверено на JVC HM-DHX1."""
     if not getattr(a, 'epn', False):
         return
     if a.copy is None:
@@ -2038,8 +1982,8 @@ def copy_control_requested(a):
 
 
 def wanted_cct(a):
-    """copy_control_type: "no encryption" for free and "encrypted" for the other
-    modes by default -- that is how broadcast carries it."""
+    """copy_control_type: по умолчанию «без шифрования» для free и «с шифрованием»
+    для остальных режимов — так это передаёт вещание."""
     if a.copy_control_type is not None:
         return CCT_ARG[a.copy_control_type]
     if a.copy is None:
@@ -2048,7 +1992,7 @@ def wanted_cct(a):
 
 
 def patch_copy_descriptor(d, a):
-    """0xC1/0xDE -> the modified descriptor (structure and tail preserved)."""
+    """0xC1/0xDE -> изменённый дескриптор (структура и хвост сохраняются)."""
     if d[0] == 0xC1 and len(d) >= 3:
         v = d[2]
         if a.copy is not None:
@@ -2067,7 +2011,7 @@ def patch_copy_descriptor(d, a):
 
 
 def apply_copy_control(descs, a, create=False):
-    """Changes 0xC1/0xDE in a descriptor list; create adds them if missing."""
+    """Меняет 0xC1/0xDE в списке дескрипторов; create — добавить, если их нет."""
     out = [patch_copy_descriptor(d, a) for d in descs]
     have = {d[0] for d in out}
     if create:
@@ -2088,7 +2032,7 @@ def apply_copy_control(descs, a, create=False):
 
 
 def copy_control_values(descs):
-    """{tag: first payload byte} for 0xC1/0xDE."""
+    """{tag: первый байт полезной нагрузки} для 0xC1/0xDE."""
     out = {}
     for d in descs:
         if d[0] in (0xC1, 0xDE) and len(d) >= 3:
@@ -2105,9 +2049,9 @@ def describe_copy_control(vals, indent='  ', show=print):
              % (indent, (v >> 5) & 1, (v >> 4) & 1))
         show('%s    copy_control_type = %02s  %s' % (indent, format((v >> 2) & 3, '02b'), CCT_NAMES[(v >> 2) & 3]))
         show('%s    APS_control_data = %02s%s' % (indent, format(v & 3, '02b'),
-                                                 '  (analogue output unrestricted)' if not v & 3 else ''))
+                                                 '  (аналоговый выход без ограничений)' if not v & 3 else ''))
     else:
-        show('%sdigital_copy_control (0xC1): absent' % indent)
+        show('%sdigital_copy_control (0xC1): нет' % indent)
     if 0xDE in vals:
         v = vals[0xDE]
         show('%scontent_availability (0xDE) = 0x%02X (%08s)' % (indent, v, format(v, '08b')))
@@ -2115,11 +2059,11 @@ def describe_copy_control(vals, indent='  ', show=print):
              'retention_state = %03s, encryption_mode = %d'
              % (indent, (v >> 6) & 1, (v >> 5) & 1, (v >> 4) & 1, format((v >> 1) & 7, '03b'), v & 1))
     else:
-        show('%scontent_availability (0xDE): absent' % indent)
+        show('%scontent_availability (0xDE): нет' % indent)
 
 
 def patch_pmt_section_inplace(sec, a):
-    """Patches 0xC1/0xDE inside a PMT section and recomputes the CRC. -> (section, bits changed)."""
+    """Меняет 0xC1/0xDE прямо в секции PMT и пересчитывает CRC. -> (секция, изменённых битов)."""
     buf = bytearray(sec)
     bits = 0
 
@@ -2149,8 +2093,8 @@ def patch_pmt_section_inplace(sec, a):
 
 
 def iter_records(path):
-    """(record, offset of the 188-byte packet inside it) -- including the file
-    head before the first sync byte and a short tail (offset None for those)."""
+    """(запись, смещение 188-байтного пакета внутри неё) — включая голову файла
+    до первого синхробайта и неполный хвост (у них смещение None)."""
     with open(path, 'rb') as f:
         head = f.read(204 * 8)
         size = start = None
@@ -2163,7 +2107,7 @@ def iter_records(path):
             if size:
                 break
         if size is None:
-            raise SystemExit('no 0x47 sync byte found: is this really MPEG-TS?')
+            raise SystemExit('не найден синхробайт 0x47: это не MPEG-TS?')
         f.seek(0)
         yield f.read(start), None
         tso = 4 if size == 192 else 0
@@ -2177,7 +2121,7 @@ def iter_records(path):
 
 
 def diff_files(a, b):
-    """Byte comparison: contiguous runs of differences and TS packet numbers."""
+    """Побайтовое сравнение: сплошные участки различий и номера TS-пакетов."""
     fa, fb = open(a, 'rb'), open(b, 'rb')
     pos, runs, cur, nbits = 0, [], None, 0
     while True:
@@ -2185,7 +2129,7 @@ def diff_files(a, b):
         if not x and not y:
             break
         if len(x) != len(y):
-            print('files differ in length')
+            print('файлы разной длины')
         for i in range(min(len(x), len(y))):
             if x[i] != y[i]:
                 nbits += bin(x[i] ^ y[i]).count('1')
@@ -2198,136 +2142,15 @@ def diff_files(a, b):
         pos += len(x)
     if cur:
         runs.append(cur)
-    print('differing runs: %d, bits: %d' % (len(runs), nbits))
+    print('различающихся участков: %d, битов: %d' % (len(runs), nbits))
     for st, en in runs[:6]:
-        print('  offset %d..%d (%d bytes, TS packet #%d)' % (st, en, en - st + 1, st // TS))
+        print('  смещение %d..%d (%d байт, TS-пакет #%d)' % (st, en, en - st + 1, st // TS))
     if len(runs) > 6:
-        print('  ... and %d more' % (len(runs) - 6))
+        print('  ... и ещё %d' % (len(runs) - 6))
 
 
 # ---------------------------------------------------------------------------
-# D-Theater / D-VHS tape format (IEC 60774-5, annex A.3)
-# ---------------------------------------------------------------------------
-#
-# A tape is laid out differently from a broadcast partial TS. Read off a demo tape:
-#   * only PAT, PMT and the elementary streams -- no NIT/SDT/EIT/TOT, and the
-#     tape examined carries no SIT either (the standard allows it but tapes vary);
-#   * constant bit rate, padded with null packets (8.9 % null on the tape);
-#   * PAT and PMT repeat about 20 times per second;
-#   * copy control travels in the DTCP_descriptor, not in the ARIB 0xC1/0xDE pair
-#     («Copy_control_descriptor of D-VHS shall be carried by using the
-#     DTCP_descriptor», A.3.2.2.2);
-#   * the PMT must carry registration MTRM, maximum_bitrate and smoothing_buffer.
-
-DTCP_CCI = {'free': 0b00, 'no-more': 0b01, 'once': 0b10, 'never': 0b11}
-DTCP_CCI_NAMES = {0b00: 'copy free', 0b01: 'no more copies',
-                  0b10: 'copy one generation', 0b11: 'copy never'}
-
-
-def component_descriptor(stream_content, component_type, tag, lang=b'jpn'):
-    """component_descriptor (0x50) the way the deck writes it into its SIT."""
-    return bytes((0x50, 6, 0xF0 | (stream_content & 0x0F), component_type, tag)) + lang
-
-
-def deck_data_content_descriptor(tag, lang=b'jpn'):
-    """The caption data_content the deck writes: a one-byte 0xFF selector,
-    no language loop inside it."""
-    body = b'\x00\x08' + bytes((tag, 1, 0xFF, 0x00)) + lang + b'\x00'
-    return bytes((0xC7, len(body))) + body
-
-
-# How each deck lays out its own recordings, read off LS3 samples of each.
-# The decks disagree on nearly everything, so --si deck needs a profile.
-DECK_PROFILES = {
-    # Victor HM-DH30000: PCR inside the video, captions kept, a full SIT.
-    'victor-dh30000': {'program': 1, 'pmt': 0x006E, 'video': 0x1000, 'audio': 0x1001,
-                       'captions': 0x1010, 'pcr': None, 'mtrm': (0x10, None),
-                       'pmt_order': ('mtrm', 'maxbr', 'dtcp'), 'maxbr': None, 'c1': None,
-                       'sit': 'full', 'running': 4, 'sit_period': None, 'dit': True,
-                       'lang': None, 'pcr_period': None},
-    # Victor HM-DHX1: PCR on its own PID 0x0FFF, SIT with components only.
-    'victor-dhx1': {'program': 1, 'pmt': 0x006E, 'video': 0x1000, 'audio': 0x1002,
-                    'captions': 0x1010, 'pcr': 0x0FFF, 'mtrm': (0x10, None),
-                    'pmt_order': ('mtrm', 'maxbr', 'dtcp'), 'maxbr': None, 'c1': None,
-                    'sit': 'components', 'running': 0, 'sit_period': None, 'dit': False,
-                    'lang': b'und', 'pcr_period': 0.050},
-    # Hitachi DT-DR20000: programme 100, PCR on 0x1010, an older MTRM (version
-    # 0x07 with the country code JPN), ARIB 0xC1 next to DTCP, a SIT that is
-    # empty apart from the partial TS descriptor, sent about once a second.
-    'hitachi': {'program': 100, 'pmt': 0x1050, 'video': 0x1020, 'audio': 0x1040,
-                'captions': 0x1060, 'pcr': 0x1010, 'mtrm': (0x07, b'JPN'),
-                'pmt_order': ('mtrm', 'dtcp', 'maxbr', 'c1'), 'maxbr': 14.4e6,
-                'c1': b'\xc1\x02\x24\x3a', 'sit': 'empty', 'running': 0,
-                'sit_period': 1.0, 'dit': True, 'lang': None, 'pcr_period': 0.038},
-}
-
-
-def read_pcr27(pkt):
-    """The full PCR in 27 MHz units (base * 300 + extension), or None."""
-    if pkt[3] & 0x20 and pkt[4] >= 7 and pkt[5] & 0x10:
-        base = (pkt[6] << 25) | (pkt[7] << 17) | (pkt[8] << 9) | (pkt[9] << 1) | (pkt[10] >> 7)
-        return base * 300 + (((pkt[10] & 1) << 8) | pkt[11])
-    return None
-
-
-def strip_pcr(pkt):
-    """The same packet without its PCR: the flag goes, the fields after it move
-    up, and the freed bytes become adaptation-field stuffing."""
-    pkt = bytearray(pkt)
-    afl = pkt[4]
-    pkt[5] &= ~0x10 & 0xFF
-    rest = pkt[12:5 + afl]
-    pkt[6:6 + len(rest)] = rest
-    for k in range(6 + len(rest), 5 + afl):
-        pkt[k] = 0xFF
-    return bytes(pkt)
-
-
-def pcr_packet(pid, pcr27):
-    """An adaptation-field-only packet carrying just a PCR, as the decks send it."""
-    pcr27 %= (1 << 33) * 300
-    base, ext = divmod(pcr27, 300)
-    af = bytes((0x10, (base >> 25) & 255, (base >> 17) & 255, (base >> 9) & 255,
-                (base >> 1) & 255, ((base & 1) << 7) | 0x7E | (ext >> 8), ext & 255))
-    return bytes((0x47, (pid >> 8) & 0x1F, pid & 255, 0x20, 183)) + af + b'\xff' * (183 - len(af))
-
-
-def mtrm_descriptor(version=0x10, country=None):
-    if country:                       # the older layout written by a Hitachi deck
-        return b'\x05\x0a' + b'MTRM' + bytes((0xFF, version)) + country + b'\xff'
-    return mtrm_descriptor_v10(version)
-
-
-def mtrm_descriptor_v10(version=0x10):
-    """registration MTRM: marks the stream as D-VHS compliant (A.3.2.2.1.1).
-    Version 1.0 is coded as 0x10, surrounded by reserved ones."""
-    return b'\x05\x0a' + b'MTRM' + bytes((0xFF, version)) + b'\xff\xff\xff\xff'
-
-
-def dtcp_descriptor(cci=0b11, epn=1, ict=1, aps=0):
-    """DTCP_descriptor (0x88): CA_System_ID = 0x0FFF (DTLA) and a byte carrying
-    EPN, DTCP_CCI, Image_Constraint_Token and APS."""
-    v = 0x80 | (epn << 6) | ((cci & 3) << 4) | 0x08 | ((ict & 1) << 2) | (aps & 3)
-    return bytes((0x88, 4, 0x0F, 0xFF, v, v))
-
-
-def maximum_bitrate_descriptor(bps):
-    v = int(bps / 8 / 50)                      # units of 50 bytes/s
-    return bytes((0x0E, 3, 0xC0 | ((v >> 16) & 0x3F), (v >> 8) & 255, v & 255))
-
-
-def smoothing_buffer_descriptor(leak_bps, size_bytes):
-    leak = int(leak_bps / 400)                 # units of 400 bit/s
-    return bytes((0x10, 6, 0xC0 | ((leak >> 16) & 0x3F), (leak >> 8) & 255, leak & 255,
-                  0xC0 | ((size_bytes >> 16) & 0x3F), (size_bytes >> 8) & 255, size_bytes & 255))
-
-
-def null_packet(cc=0):
-    return bytes((0x47, 0x1F, 0xFF, 0x10 | (cc & 0x0F))) + b'\xff' * 184
-
-
-# ---------------------------------------------------------------------------
-# SIT / DIT descriptors
+# Дескрипторы SIT / DIT
 # ---------------------------------------------------------------------------
 
 def partial_ts_descriptor(peak_rate_bps):
@@ -2355,7 +2178,7 @@ def partial_ts_time_descriptor(event, jst, event_version):
 
 
 def caption_groups(tracks):
-    """Tracks grouped by ES: [(pid, tag, [tracks])]."""
+    """Дорожки, сгруппированные по ES: [(pid, tag, [дорожки])]."""
     out = []
     for tr in tracks:
         for g in out:
@@ -2368,8 +2191,8 @@ def caption_groups(tracks):
 
 
 def set_caption_data_content(descs, tracks):
-    """A data_content descriptor (0xC7) per caption track: for replaced ES the
-    language is rewritten to the new track's, missing ones are appended."""
+    """Дескриптор данных (0xC7) на каждую субтитровую дорожку: у заменённых ES
+    язык переписывается на язык новой дорожки, недостающие добавляются."""
     groups = {tag: [t.lang for t in trs] for _pid, tag, trs in caption_groups(tracks)}
     out, seen = [], set()
     for d in descs:
@@ -2399,42 +2222,36 @@ def dit_section(transition=True):
 
 def media_type_for(network_id):
     if network_id in (0x0004, 0x0006, 0x0007):
-        return b'BS'            # BS / wide-band CS (110 degrees)
+        return b'BS'            # BS / широкополосный CS (110°)
     if network_id in (0x0001, 0x0003, 0x000A):
-        return b'CS'            # narrow-band CS
+        return b'CS'            # узкополосный CS
     if network_id == 0x000B:
         return b'AB'            # 4K/8K BS
     if network_id == 0x000C:
         return b'AC'            # 4K CS
     if 0x7880 <= network_id <= 0x7FE8:
-        return b'TB'            # terrestrial
+        return b'TB'            # наземное
     return None
 
 
-# Table 17 of IEC 60774-5: LS2..LS7 run the tape at 1/k of the STD speed, so the
-# whole stream has to stay under the mode rate at every instant, not on average.
-# Payload rates, not the gross channel rates: 28.2 / 14.1 / 4.7 Mbit/s include the
-# error-correction codes, and only 87.9 % of that is available to the stream. Both
-# decks target exactly these figures; going above makes the deck refuse the tape.
-DVHS_MODES = [('HS', 24.79e6), ('STD', 12.396e6), ('LS2', 6.198e6),
-              ('LS3', 4.132e6), ('LS5', 2.479e6), ('LS7', 1.771e6)]
+DVHS_MODES = [('HS', 28.2e6), ('STD', 14.1e6)]
 
 
 # ---------------------------------------------------------------------------
-# The full SI set of a BS broadcaster (--si broadcast): NIT, SDT, EIT, TOT, BIT
+# Полный набор SI, как у BS-вещателя (--si broadcast): NIT, SDT, EIT, TOT, BIT
 # ---------------------------------------------------------------------------
 #
-# Modelled on the tables of a Japanese broadcast (ARIB STD-B10): network_name and
-# system_management in the NIT, service_list and satellite_delivery_system for the TS,
-# service_descriptor in the SDT, EIT[p/f] plus a basic EIT schedule (0x50) with
-# short_event/component/audio_component/content/data_content, TOT with JST, and
-# BIT with SI_parameter (repetition periods) and broadcaster_name. The periods are
-# the ones declared in the reference BIT: NIT and BIT 10 s, SDT and EIT[p/f] 3 s.
-# Never generated: ECM/EMM (conditional access), SDTT (receiver firmware updates),
-# CDT (logos), BML data carousels -- those are content, not a description of the stream.
+# Модель — таблицы из японского эфира (ARIB STD-B10): network_name и
+# system_management в NIT, service_list и satellite_delivery_system для TS,
+# service_descriptor в SDT, EIT[p/f] и базовое расписание EIT (0x50) с
+# short_event/component/audio_component/content/data_content, TOT с JST,
+# BIT с SI_parameter (периоды повтора) и broadcaster_name. Периоды повтора —
+# как объявлено в BIT образца: NIT и BIT 10 с, SDT и EIT[p/f] 3 с.
+# Не генерируются: ECM/EMM (условный доступ), SDTT (обновления ПО приёмников),
+# CDT (логотипы), карусели данных BML — это не описание потока, а контент.
 
-# How the same values are named by the DVB table (EN 300 468). Players and MediaInfo
-# take the names from there, so the ARIB genre "movie" shows up as music/ballet/dance.
+# Как те же значения называет таблица DVB (EN 300 468). Плееры и MediaInfo
+# берут названия оттуда, поэтому «кино» ARIB они покажут как music/ballet/dance.
 DVB_GENRE_NAMES = {
     0x0: 'undefined', 0x1: 'Movie/Drama', 0x2: 'News/Current affairs', 0x3: 'Show/Game show',
     0x4: 'Sports', 0x5: "Children's/Youth", 0x6: 'Music/Ballet/Dance', 0x7: 'Arts/Culture',
@@ -2449,7 +2266,7 @@ GENRES = {   # ARIB STD-B10, content_nibble_level_1/level_2
 }
 SI_PERIODS = {'nit': 10, 'bit': 10, 'sdt': 3, 'eit_pf': 3, 'eit_sched': 10, 'tot': 5}
 PID_BIT = 0x0024
-BS_SATELLITE_DELIVERY = bytes.fromhex('43 0b 01 17 27 48 11 00 e8 02 88 60 08')  # BS 110E, 11.72748 GHz, from the capture
+BS_SATELLITE_DELIVERY = bytes.fromhex('43 0b 01 17 27 48 11 00 e8 02 88 60 08')  # BS 110°E, 11.72748 ГГц — из образца
 
 
 def section_n(table_id, ext, version, body, sec_num, last_sec, private=True):
@@ -2503,7 +2320,7 @@ def eit_event_bytes(ev):
 
 
 def fit_event_descs(descs, room, warn=log):
-    """Trims the tail of the description (0x4E) so the event fits the section."""
+    """Обрезает хвост описания (0x4E), чтобы событие влезло в секцию."""
     descs = list(descs)
     while sum(len(d) for d in descs) > room:
         idx = max((i for i, d in enumerate(descs) if d[0] == 0x4E), default=None)
@@ -2511,11 +2328,11 @@ def fit_event_descs(descs, room, warn=log):
             idx = len(descs) - 1
             if idx < 0:
                 break
-        warn('the event description does not fit the EIT section -- the tail was dropped')
+        warn('описание передачи не помещается в секцию EIT — хвост отброшен')
         del descs[idx]
     last = sum(1 for d in descs if d[0] == 0x4E) - 1
     k = 0
-    for i, d in enumerate(descs):                 # renumber the remaining parts
+    for i, d in enumerate(descs):                 # перенумеровать оставшиеся части
         if d[0] == 0x4E:
             descs[i] = d[:2] + bytes(((k << 4) | last,)) + d[3:]
             k += 1
@@ -2534,7 +2351,7 @@ def eit_pf_sections(sid, tsid, onid, present, following, version):
 
 
 def eit_schedule_sections(sid, tsid, onid, events, now, version):
-    """Basic schedule (table_id 0x50..): three-hour segments from JST midnight."""
+    """Базовое расписание (table_id 0x50..): сегменты по 3 часа от полуночи JST."""
     midnight = datetime.datetime(now.year, now.month, now.day)
     segs = collections.defaultdict(list)
     for ev in events:
@@ -2584,15 +2401,15 @@ def bit_section(onid, broadcaster_id, broadcaster_name, services, update, versio
 
 
 def superimpose_pes(lang=b'jpn'):
-    """An asynchronous PES (stream_id 0xBF) carrying only caption_management_data --
-    exactly how a broadcaster keeps the superimpose stream idle."""
+    """Асинхронный PES (stream_id 0xBF) только с caption_management_data —
+    ровно так вещатель держит «пустой» поток суперимпоза (文字スーパー)."""
     dg = data_group(0x00, bytes((0x3F, 0x01, 0x12)) + lang + b'\x80\x00\x00\x00')
     payload = b'\x81\xff\xf0' + dg
     return b'\x00\x00\x01\xbf' + len(payload).to_bytes(2, 'big') + payload
 
 
 def parse_video_info(data, stream_type):
-    """Resolution/scan/aspect from the MPEG-2 sequence header (H.264 roughly)."""
+    """Разрешение/развёртка/аспект из MPEG-2 sequence header (H.264 — грубо)."""
     info = {}
     if stream_type in (0x01, 0x02):
         i = data.find(b'\x00\x00\x01\xb3')
@@ -2644,8 +2461,8 @@ def parse_audio_info(data, stream_type):
 
 
 def audio_component_descriptors(pmt_info, audio, audio_langs, names=None, only_tags=None, cs=None):
-    """audio_component_descriptor (0xC4) for every audio ES in PMT order: the
-    first is the main component, language and name come per track."""
+    """audio_component_descriptor (0xC4) для каждого звукового ES в порядке PMT:
+    первый — основной (main_component_flag), язык и название — по дорожкам."""
     descs, n = [], 0
     for es in pmt_info['es']:
         tag = component_tag(es)
@@ -2682,21 +2499,21 @@ def event_component_descriptors(pmt_info, video, audio, cap_tags, lang, audio_la
 
 
 # ---------------------------------------------------------------------------
-# Audio replacement: WAV -> MPEG-2 AAC-LC in ADTS with CRC, packed as a BS broadcaster does
+# Замена звука: WAV -> MPEG-2 AAC-LC в ADTS с CRC, упаковка как у BS-вещателя
 # ---------------------------------------------------------------------------
 #
-# Reference (BS, PID 0x110): ADTS MPEG-2 (ID=1), AAC-LC, 48 kHz, stereo,
-# protection_absent=0 (CRC-16 in every frame), about 256 kbit/s. PES of a fixed
-# 736 bytes = exactly 4 TS packets, header always 7 bytes: PTS plus 2 stuffing
-# bytes, or 7 stuffing bytes when no frame starts in that PES; the PTS belongs to
-# the first frame starting inside. A PES arrives about 0.16 s before its PTS.
-# fdkaac (-p 129 -C) produces such ADTS with a correct CRC; the AAC encoder built
-# into ffmpeg writes no CRC, in which case only ID=1 and protection_absent=1 are set.
+# Образец (BS, PID 0x110): ADTS MPEG-2 (ID=1), AAC-LC, 48 кГц, стерео,
+# protection_absent=0 (CRC-16 в каждом кадре), ~256 кбит/с. PES фиксированного
+# размера 736 байт = ровно 4 TS-пакета, заголовок всегда 7 байт: PTS + 2 байта
+# заполнения или 7 байт заполнения, если в PES не начинается ни один кадр;
+# PTS — первого кадра, начинающегося в PES. PES приходит за ~0.16 с до PTS.
+# Такой ADTS с корректной CRC делает fdkaac (-p 129 -C); встроенный AAC
+# ffmpeg CRC не пишет — тогда ставится только ID=1, protection_absent=1.
 
 AUDIO_PES_SIZE = 736
 AUDIO_LEAD = 0.16
 def per_track(values, n, default=None):
-    """The value for track n from a list "a,b,c" (the last one repeats)."""
+    """Значение для n-й дорожки из списка «a,b,c» (последнее повторяется)."""
     if not values:
         return default
     return values[min(n, len(values) - 1)]
@@ -2707,39 +2524,34 @@ def split_list(text, conv=str):
 
 
 class TrackAction(argparse.Action):
-    """--audio / --audio-wav / --audio-aac all append to one ordered list."""
+    """--audio / --audio-wav / --audio-aac пишут в один упорядоченный список."""
 
     def __call__(self, parser, ns, value, option):
         kind = {'--audio-wav': 'wav', '--audio-aac': 'aac', '--audio-mp2': 'mp2',
-                '--audio-pcm': 'pcm', '--audio-ac3': 'ac3', '--audio-dts': 'dts'}.get(option)
+                '--audio-pcm': 'pcm', '--audio-ac3': 'ac3'}.get(option)
         if kind is None:
             low = value.lower()
             kind = ('aac' if low.endswith(('.aac', '.adts')) else
                     'ac3file' if low.endswith(('.ac3', '.eac3')) else
-                    'dtsfile' if low.endswith(('.dts', '.dca')) else
                     'mp2file' if low.endswith(('.mp2', '.mpa', '.m2a')) else 'wav')
         elif kind == 'mp2' and value.lower().endswith(('.mp2', '.mpa', '.m2a')):
             kind = 'mp2file'
         elif kind == 'ac3' and value.lower().endswith(('.ac3', '.eac3')):
             kind = 'ac3file'
-        elif kind == 'dts' and value.lower().endswith(('.dts', '.dca')):
-            kind = 'dtsfile'
         lst = list(getattr(ns, self.dest, None) or [])
         lst.append((kind, value))
         setattr(ns, self.dest, lst)
 
 
-AUDIO_NAMES, AUDIO_CS = {}, None      # component_tag -> track name; the string encoder
+AUDIO_NAMES, AUDIO_CS = {}, None      # component_tag -> название дорожки; кодировщик строк
 
-# Encoder delay in samples, measured with a click through a full encode-decode
-# cycle. For a ready-made file the encoder is unknown: Layer II delay is fixed by
-# the format itself (the filterbank), so it is the same everywhere; AAC delay
-# depends on the encoder, and 2048 is the most common value (fdkaac, Apple, Nero),
-# while ffmpeg uses 1024.
+# Отсчётов задержки кодировщика, измерено на щелчке через полный цикл кодирование->
+# декодирование. Для готового файла кодировщик неизвестен: у Layer II задержка задана
+# самим форматом (фильтрбанк), поэтому она одна для всех; у AAC зависит от кодировщика,
+# и 2048 — самое частое значение (fdkaac, Apple, Nero), у ffmpeg 1024.
 AAC_ENCODER_DELAY = {'fdkaac': 2048, 'ffmpeg': 1024, 'file': 2048}
 MP2_ENCODER_DELAY = {'libtwolame': 482, 'mp2': 482, 'file': 482}
-AC3_ENCODER_DELAY = {'ffmpeg': 256, 'file': 256}                  # measured with a click
-DTS_ENCODER_DELAY = {'ffmpeg': 518, 'file': 518}                  # measured with a click
+AC3_ENCODER_DELAY = {'ffmpeg': 256, 'file': 256}                  # измерено на щелчке
 
 
 def is_audio_es(es):
@@ -2753,14 +2565,14 @@ def is_audio_es(es):
 
 
 def adts_extra(head):
-    """The ADTS fields IEC 60774-5 checks: buffer fullness, profile, blocks."""
+    """Поля ADTS, которые проверяет IEC 60774-5: наполнение буфера, профиль, блоки."""
     return {'buffer_fullness': ((head[5] & 0x1F) << 6) | (head[6] >> 2),
             'profile': (head[2] >> 6) + 1,
             'blocks': (head[6] & 3) + 1}
 
 
 def adts_frames(data):
-    """-> a list of (offset, length) plus the parameters of the first frame."""
+    """-> список (offset, length) и параметры первого кадра."""
     frames, i, info = [], 0, None
     while i + 7 <= len(data):
         if data[i] != 0xFF or data[i + 1] & 0xF6 != 0xF0:
@@ -2784,7 +2596,7 @@ def adts_frames(data):
 
 
 MPA_RATES = {3: [44100, 48000, 32000], 2: [22050, 24000, 16000], 0: [11025, 12000, 8000]}
-MPA_BITRATES = {   # (is MPEG-1?, layer) -> index table
+MPA_BITRATES = {   # (версия MPEG-1?, слой) -> таблица индексов
     (1, 1): [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],
     (1, 2): [0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],
     (1, 3): [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
@@ -2794,7 +2606,7 @@ MPA_BITRATES = {   # (is MPEG-1?, layer) -> index table
 
 
 def mpa_frames(data):
-    """MPEG-1/2 Audio frames (Layer I/II/III) -> [(offset, length)] and parameters."""
+    """Кадры MPEG-1/2 Audio (Layer I/II/III) -> [(offset, length)] и параметры."""
     frames, i, info = [], 0, None
     while i + 4 <= len(data):
         if data[i] != 0xFF or (data[i + 1] & 0xE0) != 0xE0:
@@ -2833,24 +2645,24 @@ def mpa_frames(data):
 
 
 def encode_wav_to_mp2(path, encoder, bitrate, channels, warn):
-    """WAV -> MPEG-1 Layer II 48 kHz (for decks that do not understand AAC)."""
+    """WAV -> MPEG-1 Layer II 48 кГц (для дек, которые не понимают AAC)."""
     import os
     import shutil
     import subprocess
     import tempfile
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
-        raise SystemExit('MP2 needs ffmpeg')
+        raise SystemExit('для MP2 нужен ffmpeg')
     codec = encoder if encoder != 'auto' else (
         'libtwolame' if 'libtwolame' in subprocess.run([ffmpeg, '-hide_banner', '-encoders'],
                                                        capture_output=True, text=True).stdout else 'mp2')
     ch = channels or (wav_channels(path) or 2)
     if ch > 2:
-        warn('%s: Layer II carries no multichannel audio -- downmixed to stereo' % path)
+        warn('%s: Layer II многоканальный звук не несёт — сведено в стерео' % path)
         ch = 2
     limit = 384 if ch == 2 else 192
     if bitrate > limit:
-        warn('%s: MP2 with %d channels allows at most %d kbit/s' % (path, ch, limit))
+        warn('%s: для MP2 %d кан. максимум %d кбит/с' % (path, ch, limit))
         bitrate = limit
     tmp = tempfile.NamedTemporaryFile(suffix='.mp2', delete=False)
     tmp.close()
@@ -2858,12 +2670,12 @@ def encode_wav_to_mp2(path, encoder, bitrate, channels, warn):
         cmd = [ffmpeg, '-v', 'error', '-y', '-i', path, '-vn', '-ar', '48000', '-ac', str(ch),
                '-c:a', codec, '-b:a', '%dk' % bitrate]
         if codec == 'libtwolame':
-            cmd += ['-error_protection', '1']     # IEC 60774-5: CRC is mandatory
+            cmd += ['-error_protection', '1']     # IEC 60774-5: CRC обязателен
         cmd += ['-f', 'mp2', tmp.name]
         subprocess.run(cmd, check=True)
         data = bytearray(open(tmp.name, 'rb').read())
     except subprocess.CalledProcessError as e:
-        raise SystemExit('MP2 encoding failed: %s' % e)
+        raise SystemExit('кодирование MP2 не удалось: %s' % e)
     finally:
         os.unlink(tmp.name)
     return data, codec
@@ -2875,7 +2687,7 @@ AC3_ACMOD_CH = [2, 1, 2, 3, 3, 4, 4, 5]   # 1+1, 1/0, 2/0, 3/0, 2/1, 3/1, 2/2, 3
 
 
 def ac3_frames(data):
-    """AC-3 frames (ATSC A/52) -> [(offset, length)] and stream parameters."""
+    """Кадры AC-3 (ATSC A/52) -> [(смещение, длина)] и параметры потока."""
     frames, i, info = [], 0, None
     while i + 8 <= len(data):
         if data[i] != 0x0B or data[i + 1] != 0x77:
@@ -2891,7 +2703,7 @@ def ac3_frames(data):
         rate = AC3_RATES[fscod]
         kbps = AC3_BITRATES[frmsizecod >> 1]
         words = {0: kbps * 2, 1: (kbps * 1536 // 44100 + (frmsizecod & 1)) or 1, 2: kbps * 3}[fscod]
-        if fscod == 1:                       # 44.1 kHz: the size depends on the parity bit
+        if fscod == 1:                       # 44,1 кГц: размер зависит от бита чётности
             words = (1536 * kbps * 1000 // 44100 // 16 + (frmsizecod & 1))
         length = words * 2
         if length < 8 or i + length > len(data):
@@ -2915,91 +2727,21 @@ def ac3_frames(data):
     return frames, info
 
 
-DTS_RATES = [32, 56, 64, 96, 112, 128, 192, 224, 256, 320, 384, 448, 512, 576, 640, 768,
-             960, 1024, 1152, 1280, 1344, 1408, 1411, 1472, 1510, 1920, 2048, 3072, 3840]
-DTS_SFREQ = [0, 8000, 16000, 32000, 0, 0, 11025, 22050, 44100, 0, 0, 12000, 24000, 48000]
-DTS_AMODE = {0: '1/0 mono', 1: '1+1', 2: '2/0 stereo', 3: '2/0 (L+R)', 4: '2/0 (LT/RT)',
-             5: '3/0', 6: '2/1', 7: '3/1', 8: '2/2', 9: '3/2'}
-DTS_AMODE_CH = {0: 1, 1: 2, 2: 2, 3: 2, 4: 2, 5: 3, 6: 3, 7: 4, 8: 4, 9: 5}
-
-
-def dts_frames(data):
-    """DTS Coherent Acoustics core frames -> [(offset, length)] and parameters.
-    The 16-bit big-endian sync word is 0x7FFE8001."""
-    frames, i, info = [], 0, None
-    while i + 14 <= len(data):
-        if data[i:i + 4] != b'\x7f\xfe\x80\x01':
-            j = data.find(b'\x7f\xfe\x80\x01', i + 1)
-            if j < 0:
-                break
-            i = j
-            continue
-        bits = int.from_bytes(data[i + 4:i + 12], 'big')
-        get = lambda hi, n: (bits >> (64 - hi - n)) & ((1 << n) - 1)
-        nblks = get(7, 7) + 1
-        length = get(14, 14) + 1
-        amode, sfreq, rate = get(28, 6), get(34, 4), get(38, 5)
-        lff = get(53, 2)              # FixedBit, DYNF, TIMEF, AUXF, HDCD, EXT_AUDIO_ID(3),
-                                        # EXT_AUDIO, ASPF sit between RATE and LFF
-        if length < 14 or i + length > len(data) or sfreq >= len(DTS_SFREQ) or not DTS_SFREQ[sfreq]:
-            i += 4
-            continue
-        if info is None:
-            ch = DTS_AMODE_CH.get(amode, 2) + (1 if lff in (1, 2) else 0)
-            info = {'rate': DTS_SFREQ[sfreq], 'kbps': DTS_RATES[rate] if rate < len(DTS_RATES) else 0,
-                    'mode': DTS_AMODE.get(amode, '?'), 'amode': amode, 'lfe': lff in (1, 2),
-                    'ch': ch, 'crc': bool(get(6, 1)), 'mpeg1': True, 'mpeg2': True,
-                    'spf': nblks * 32}
-        frames.append((i, length))
-        i += length
-    return frames, info
-
-
-def encode_wav_to_dts(path, bitrate, channels, warn):
-    """WAV -> DTS Coherent Acoustics 48 kHz, as on D-Theater tapes."""
-    import os
-    import shutil
-    import subprocess
-    import tempfile
-    ffmpeg = shutil.which('ffmpeg')
-    if not ffmpeg:
-        raise SystemExit('DTS needs ffmpeg')
-    ch = channels or (wav_channels(path) or 2)
-    if ch not in (1, 2, 6):
-        warn('%s: %d channels downmixed to stereo' % (path, ch))
-        ch = 2
-    if bitrate > 1510:
-        warn('%s: D-VHS allows at most 1509.75 kbit/s for DTS' % path)
-        bitrate = 1510
-    tmp = tempfile.NamedTemporaryFile(suffix='.dts', delete=False)
-    tmp.close()
-    try:
-        subprocess.run([ffmpeg, '-v', 'error', '-y', '-i', path, '-vn', '-ar', '48000', '-ac', str(ch),
-                        '-c:a', 'dca', '-strict', '-2', '-b:a', '%dk' % bitrate, '-f', 'dts', tmp.name],
-                       check=True)
-        data = bytearray(open(tmp.name, 'rb').read())
-    except subprocess.CalledProcessError as e:
-        raise SystemExit('DTS encoding failed: %s' % e)
-    finally:
-        os.unlink(tmp.name)
-    return data, 'ffmpeg'
-
-
 def encode_wav_to_ac3(path, bitrate, channels, warn):
-    """WAV -> Dolby Digital 48 kHz (ATSC A/52), as on D-Theater tapes."""
+    """WAV -> Dolby Digital 48 кГц (ATSC A/52), как на лентах D-Theater."""
     import os
     import shutil
     import subprocess
     import tempfile
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
-        raise SystemExit('AC-3 needs ffmpeg')
+        raise SystemExit('для AC-3 нужен ffmpeg')
     ch = channels or (wav_channels(path) or 2)
     if ch not in (1, 2, 6):
-        warn('%s: %d channels downmixed to stereo' % (path, ch))
+        warn('%s: %d каналов сведены в стерео' % (path, ch))
         ch = 2
     if bitrate > 640:
-        warn('%s: D-VHS allows at most 640 kbit/s for AC-3' % path)
+        warn('%s: D-VHS допускает для AC-3 не больше 640 кбит/с' % path)
         bitrate = 640
     tmp = tempfile.NamedTemporaryFile(suffix='.ac3', delete=False)
     tmp.close()
@@ -3008,7 +2750,7 @@ def encode_wav_to_ac3(path, bitrate, channels, warn):
                         '-c:a', 'ac3', '-b:a', '%dk' % bitrate, '-f', 'ac3', tmp.name], check=True)
         data = bytearray(open(tmp.name, 'rb').read())
     except subprocess.CalledProcessError as e:
-        raise SystemExit('AC-3 encoding failed: %s' % e)
+        raise SystemExit('кодирование AC-3 не удалось: %s' % e)
     finally:
         os.unlink(tmp.name)
     return data, 'ffmpeg'
@@ -3033,7 +2775,7 @@ def encode_wav_to_adts(path, encoder, bitrate, channels, warn):
     if encoder == 'auto':
         encoder = 'fdkaac' if fdk else 'ffmpeg' if ffmpeg else None
         if encoder is None:
-            raise SystemExit('--audio-wav needs fdkaac (preferred, CRC like a broadcaster) or ffmpeg')
+            raise SystemExit('для --audio-wav нужен fdkaac (лучше, с CRC как у вещателя) или ffmpeg')
     rate = ch = None
     try:
         with wave.open(path, 'rb') as w:
@@ -3043,49 +2785,49 @@ def encode_wav_to_adts(path, encoder, bitrate, channels, warn):
     if channels:
         out_ch = channels
     elif ch in (1, 2, 6):
-        out_ch = ch                      # keep 5.1: ARIB allows it (3/2+LFE)
+        out_ch = ch                      # 5.1 сохраняем: ARIB его допускает (3/2+LFE)
     elif ch:
         out_ch = 2
-        warn('%s: %d channels downmixed to stereo (ARIB knows 1, 2 and 6)' % (path, ch))
+        warn('%s: %d каналов сведены в стерео (ARIB знает 1, 2 и 6)' % (path, ch))
     else:
         out_ch = 2
     if out_ch == 6 and bitrate < 320:
-        warn('5.1 at %d kbit/s is thin; Japanese broadcast uses 384-448' % bitrate)
+        warn('5.1 на %d кбит/с — маловато; в японском вещании это 384–448' % bitrate)
     tmp = tempfile.NamedTemporaryFile(suffix='.aac', delete=False)
     tmp.close()
     try:
         if encoder == 'fdkaac':
             if not fdk:
-                raise SystemExit('fdkaac not found in PATH')
+                raise SystemExit('fdkaac не найден в PATH')
             base = [fdk, '-p', '129', '-f', '2', '-C', '-m', '0', '-b', str(bitrate * 1000), '-S', '-o', tmp.name]
             if rate == 48000 and ch == out_ch:
-                subprocess.run(base + [path], check=True)   # WAV with a channel mask: order is preserved
+                subprocess.run(base + [path], check=True)   # WAV с маской каналов: порядок сохраняется
             else:
                 if not ffmpeg:
-                    raise SystemExit('WAV is not 48 kHz/%d ch: ffmpeg is needed to resample' % out_ch)
+                    raise SystemExit('WAV не 48 кГц/%d кан.: для пересчёта нужен ffmpeg' % out_ch)
                 dec = subprocess.Popen([ffmpeg, '-v', 'error', '-i', path, '-ar', '48000', '-ac', str(out_ch),
                                         '-f', 's16le', '-'], stdout=subprocess.PIPE)
                 subprocess.run(base + ['-R', '--raw-channels', str(out_ch), '--raw-rate', '48000',
                                        '--raw-format', 'S16L', '-'], stdin=dec.stdout, check=True)
                 dec.stdout.close()
                 if dec.wait():
-                    raise SystemExit('ffmpeg could not read %s' % path)
+                    raise SystemExit('ffmpeg не смог прочитать %s' % path)
         else:
             if not ffmpeg:
-                raise SystemExit('ffmpeg not found in PATH')
-            warn('AAC encoded by ffmpeg: no CRC in ADTS (a broadcaster has one; install fdkaac)')
+                raise SystemExit('ffmpeg не найден в PATH')
+            warn('AAC кодируется ffmpeg: без CRC в ADTS (у вещателя CRC есть; поставьте fdkaac)')
             subprocess.run([ffmpeg, '-v', 'error', '-y', '-i', path, '-ar', '48000', '-ac', str(out_ch),
                             '-c:a', 'aac', '-b:a', '%dk' % bitrate, '-f', 'adts', tmp.name], check=True)
         data = bytearray(open(tmp.name, 'rb').read())
     except subprocess.CalledProcessError as e:
-        raise SystemExit('audio encoding failed: %s' % e)
+        raise SystemExit('кодирование звука не удалось: %s' % e)
     finally:
         os.unlink(tmp.name)
     return data, encoder
 
 
 class CaptionTrack:
-    """One caption ES: its own event layout, PID, component_tag and language."""
+    """Один субтитровый ES: своя раскладка событий, PID, component_tag и язык."""
 
     def __init__(self, path, subs, lang):
         self.path, self.subs, self.lang = path, subs, lang
@@ -3106,7 +2848,7 @@ class CaptionTrack:
         for i, sub in enumerate(subs):
             t_show = T0 + int(round((sub['start'] + off) * 90000))
             t_end = T0 + int(round((sub['end'] + off) * 90000))
-            w = lambda m, i=i: warn('%s, cue #%d: %s' % (os.path.basename(self.path), i + 1, m))
+            w = lambda m, i=i: warn('%s, субтитр #%d: %s' % (os.path.basename(self.path), i + 1, m))
             ev.append((t_show, 1, build_statement(sub, cs, w, self.lang_tag), 'show', t_end))
             nxt = subs[i + 1]['start'] + off if i + 1 < len(subs) else None
             if nxt is None or nxt - (sub['end'] + off) >= 0.1:
@@ -3116,17 +2858,18 @@ class CaptionTrack:
 
 
 BIT_REVERSE = [int('{:08b}'.format(i)[::-1], 2) for i in range(256)]
-PCM_SAMPLES_PER_PES = 1600        # 33.3 ms, one video frame, the way the deck does it
+PCM_SAMPLES_PER_PES = 1600        # 33,3 мс — как кадр видео, так делает дека
 
 
 def pack_smpte302(samples, status_first=True):
-    """16-bit stereo pairs -> SMPTE 302M: 5 bytes per pair, 20 bits per channel.
+    """16-битные стереопары -> SMPTE 302M: 5 байт на пару, по 20 бит на канал.
 
-    Two orders inside the 20-bit field:
-      status_first=True  -- 4 status bits, then 16 audio bits LSB first. This is
-                           what D-VHS writes (verified on a deck recording: the
-                           correlation with the MP2 track of the same file is 0.98).
-      status_first=False -- the way ffmpeg encodes: audio first, status last."""
+    Два порядка внутри 20-битного поля:
+      status_first=True  — 4 служебных бита, затем 16 бит звука младшим вперёд.
+                           Так пишет D-VHS (проверено на записи с деки: корреляция
+                           с дорожкой MP2 того же файла 0,98).
+      status_first=False — как кодирует ffmpeg: сначала звук, потом служебные.
+    """
     out = bytearray()
     for l, r in samples:
         a = (BIT_REVERSE[l & 0xFF] << 8) | BIT_REVERSE[(l >> 8) & 0xFF]
@@ -3153,16 +2896,16 @@ def unpack_smpte302(data, status_first=True):
 
 
 def read_pcm_48k(path, ffmpeg, warn):
-    """Any file -> a list of 16-bit 48 kHz stereo pairs (through ffmpeg)."""
+    """Любой файл -> список стереопар 16 бит 48 кГц (через ffmpeg)."""
     import struct
     import subprocess
     try:
         res = subprocess.run([ffmpeg, '-v', 'error', '-i', path, '-vn', '-ar', '48000',
                               '-ac', '2', '-f', 's16le', '-'], capture_output=True)
     except OSError:
-        raise SystemExit('PCM needs ffmpeg (or pass --ffmpeg)')
+        raise SystemExit('для PCM нужен ffmpeg (или укажите --ffmpeg)')
     if res.returncode != 0 or not res.stdout:
-        raise SystemExit('could not read %r:\n%s' % (path, res.stderr.decode(errors='replace')))
+        raise SystemExit('не удалось прочитать %r:\n%s' % (path, res.stderr.decode(errors='replace')))
     raw = res.stdout
     n = len(raw) // 4
     v = struct.unpack('<%dh' % (n * 2), raw[:n * 4])
@@ -3170,8 +2913,8 @@ def read_pcm_48k(path, ffmpeg, warn):
 
 
 class PcmTrack:
-    """Linear PCM per SMPTE 302M -- the audio a deck writes in STD mode and the
-    kind found on D-Theater tapes. stream_type 0x83, PES 0xBD."""
+    """Линейный PCM по SMPTE 302M — тот самый звук, которым дека пишет в STD
+    и который встречается на лентах D-Theater. stream_type 0x83, PES 0xBD."""
 
     codec = 'pcm'
     stream_type = 0x83
@@ -3194,15 +2937,15 @@ class PcmTrack:
             chunk = self.samples[pos:pos + step]
             self.pes_list.append((pos, chunk))
             pos += step
-        # drop whatever would land before the video starts
+        # отбрасываем то, что оказалось бы раньше начала видео
         self.pes_list = [(o, c) for o, c in self.pes_list
                          if start_T + o * 90000 // 48000 >= first_T]
         self.start_T = start_T
-        self.packets = []                       # (delivery time, PES index)
+        self.packets = []                       # (время доставки, PES-индекс)
         self.built = {}
         self.nchunks = len(self.pes_list)
         self.next = 0
-        self.pending = []                       # (due time, TS packet), handed out one by one
+        self.pending = []                       # (срок, TS-пакет) — раздаём по одному
         self.duration = len(self.samples) / 48000.0
         self.chunk = step
 
@@ -3216,7 +2959,7 @@ class PcmTrack:
         head = bytes((len(body) >> 8, len(body) & 255, 0x00, 0x00))   # SMPTE 302M
         payload = head + body
         pts = self.start_T + off * 90000 // 48000 - offset
-        hdr = bytes((0x87, 0x80, 0x0F)) + encode_pts(pts) + b'\xff' * 10   # as on the deck
+        hdr = bytes((0x87, 0x80, 0x0F)) + encode_pts(pts) + b'\xff' * 10   # как у деки
         n = len(hdr) + len(payload)
         return b'\x00\x00\x01\xbd' + bytes((n >> 8, n & 255)) + hdr + payload
 
@@ -3225,35 +2968,29 @@ class PcmTrack:
 
 
 class AudioTrack:
-    """One audio ES (AAC ADTS, MPEG-1 Layer II or AC-3) and its split into PES."""
+    """Один звуковой ES (AAC ADTS или MPEG-1 Layer II) и его нарезка на PES."""
 
     def __init__(self, data, source, delay, codec='aac'):
-        if codec == 'dts':
-            frames, info = dts_frames(data)
-            if not frames or not info:
-                raise SystemExit('no DTS frames found in the audio')
-            self.samples_per_frame = info['spf']
-            self.stream_type = 0x82
-        elif codec == 'ac3':
+        if codec == 'ac3':
             frames, info = ac3_frames(data)
             if not frames or not info:
-                raise SystemExit('no AC-3 frames found in the audio')
+                raise SystemExit('в звуке не найдено кадров AC-3')
             self.samples_per_frame = info['spf']
             self.stream_type = 0x81
         elif codec == 'mp2':
             frames, info = mpa_frames(data)
             if not frames or not info:
-                raise SystemExit('no MPEG audio frames found in the audio')
+                raise SystemExit('в звуке не найдено кадров MPEG audio')
             if info['layer'] != 2:
-                raise SystemExit('MPEG Layer II required, found Layer %s' % 'I II III'.split()[info['layer'] - 1])
+                raise SystemExit('нужен MPEG Layer II, а найден Layer %s' % 'I II III'.split()[info['layer'] - 1])
             self.samples_per_frame = info['spf']
             self.stream_type = 0x03 if info['mpeg1'] else 0x04
         else:
             frames, info = adts_frames(data)
             if not frames or not info:
-                raise SystemExit('no ADTS frames found in the audio')
+                raise SystemExit('в звуке не найдено кадров ADTS')
             if not info['mpeg2'] and not info['crc']:
-                for off, _ in frames:                   # ID=1 (MPEG-2) as on air; safe without CRC
+                for off, _ in frames:                   # ID=1 (MPEG-2), как в эфире; без CRC это безопасно
                     data[off + 1] |= 0x08
                 info['mpeg2'] = True
             self.samples_per_frame = 1024
@@ -3261,15 +2998,14 @@ class AudioTrack:
             info.update(adts_extra(data[frames[0][0]:frames[0][0] + 7]))
         covered = sum(n for _, n in frames)
         if covered < 0.5 * len(data) or len(frames) < 2:
-            raise SystemExit('%s: the file does not look like a %s stream -- only %d frames recognised (%d of %d bytes)'
-                             % ('audio', {'mp2': 'MPEG Layer II', 'ac3': 'AC-3',
-                                          'dts': 'DTS'}.get(codec, 'ADTS AAC'),
+            raise SystemExit('%s: файл не похож на поток %s — распознано лишь %d кадров (%d из %d байт)'
+                             % ('звук', {'mp2': 'MPEG Layer II', 'ac3': 'AC-3'}.get(codec, 'ADTS AAC'),
                                 len(frames), covered, len(data)))
         self.codec = codec
         self.data, self.frames, self.info, self.source, self.delay = data, frames, info, source, delay
 
     def schedule(self, start_T, first_T):
-        """Frame PTS from start_T (the T scale), dropping frames before the first PCR."""
+        """PTS кадров от start_T (T-шкала), отбрасывая кадры до первого PCR."""
         rate = self.info['rate']
         k0 = 0
         pts = [start_T + round((k * self.samples_per_frame - self.delay) * 90000 / rate) for k in range(len(self.frames))]
@@ -3292,10 +3028,10 @@ class AudioTrack:
         return self.pts[max(k, 0)] - int(AUDIO_LEAD * 90000)
 
     def stream_id(self):
-        return 0xBD if self.codec in ('ac3', 'dts') else 0xC0
+        return 0xBD if self.codec == 'ac3' else 0xC0
 
     def tail_pes(self, offset):
-        """If delivery stopped mid-frame, send the rest of it (a short PES)."""
+        """Если отправка остановилась посреди кадра — дослать его до конца (короткий PES)."""
         import bisect
         pos = self.next * self.chunk
         if self.next == 0 or pos >= len(self.es):
@@ -3324,14 +3060,14 @@ class AudioTrack:
 
 
 def pcr_only_packet(pkt):
-    """A packet of the old audio PID that carries PCR: keep only the adaptation field."""
+    """Пакет старого звукового PID, несущий PCR: оставляем только adaptation field."""
     afl = pkt[4]
     af = bytes(pkt[5:5 + afl])
     return bytes((0x47, pkt[1] & 0x1F, pkt[2], 0x20, 183)) + af + b'\xff' * (183 - afl)
 
 
 # ---------------------------------------------------------------------------
-# Pre-scan
+# Предварительный анализ
 # ---------------------------------------------------------------------------
 
 class Probe:
@@ -3346,12 +3082,12 @@ class Probe:
         self.has_sit = False
         self.pcr_pid = None
         self.av_pids = []
-        self.es_head = {}        # pid -> first ES bytes (for resolution/channels)
+        self.es_head = {}        # pid -> первые байты ES (для разрешения/каналов)
         self.first_pcr = None
         self.last_pcr = None
-        self.first_pts = {}      # pid -> first PTS (audio/video PES)
-        self.first_pcr_pid = {}  # pid -> first PCR
-        self.buckets = []        # per 0.5 s: {pid: packets}
+        self.first_pts = {}      # pid -> первый PTS (аудио/видео PES)
+        self.first_pcr_pid = {}  # pid -> первый PCR
+        self.buckets = []        # по 0.5 с: {pid: пакетов}
         self.service_id = service_id
         self._scan(limit)
 
@@ -3491,11 +3227,11 @@ def parse_eit_present(sec):
 def es_type_name(t):
     return {0x01: 'MPEG-1 video', 0x02: 'MPEG-2 video', 0x1B: 'H.264', 0x24: 'HEVC',
             0x03: 'MPEG-1 audio', 0x04: 'MPEG-2 audio', 0x0F: 'AAC', 0x11: 'AAC-LATM',
-            0x81: 'AC-3', 0x06: 'PES private', 0x0D: 'DSM-CC (data)', 0x0B: 'DSM-CC'}.get(t, '0x%02X' % t)
+            0x81: 'AC-3', 0x06: 'PES private', 0x0D: 'DSM-CC (данные)', 0x0B: 'DSM-CC'}.get(t, '0x%02X' % t)
 
 
 # ---------------------------------------------------------------------------
-# Multiplexer
+# Мультиплексор
 # ---------------------------------------------------------------------------
 
 class Muxer:
@@ -3507,34 +3243,19 @@ class Muxer:
         self.warnings = []
         svc = probe.select_service()
         if not svc:
-            raise SystemExit('service not found (try --list and --service-id)')
+            raise SystemExit('сервис не найден (используйте --list и --service-id)')
         self.sid, self.pmt_pid = svc
         self.src_pmt = probe.pmts[self.pmt_pid]
         self.isdb = probe.nit_id is not None and media_type_for(probe.nit_id) is not None
-        mode = 'dtheater' if args.dtheater else ('keep' if args.no_partial_ts else args.si)
-        if mode in ('dtheater', 'deck'):
-            pass
-        elif mode == 'broadcast' and self.isdb and not args.si_regenerate:
-            log('The stream is already Japanese with full SI -- tables are kept as they are (use --si-regenerate to rebuild).')
+        mode = 'keep' if args.no_partial_ts else args.si
+        if mode == 'broadcast' and self.isdb and not args.si_regenerate:
+            log('Поток уже японский и с полным SI — таблицы остаются исходными (перегенерировать: --si-regenerate).')
             mode = 'keep'
         self.mode = mode
-        self.dtheater = mode in ('dtheater', 'deck')
-        self.deck = mode == 'deck'          # exactly what a given deck writes
-        self.prof = DECK_PROFILES[args.deck_profile] if self.deck else None
-        self.pcr_out_pid = self.prof['pcr'] if self.prof else None
-        self.pcr_anchor = None              # (output pos, PCR, source pos, PCR) of the timeline
-        self.tick27 = None                  # 27 MHz ticks per packet, over a long baseline
-        self.last_pcr_pos = 0
-        self.pcr_discontinuity = False
-        self.extra = 0                      # packets inserted ahead of a free slot
-        self.src_count = 0
-        self.partial = mode != 'keep'            # filter PIDs and build our own PAT
+        self.partial = mode != 'keep'            # фильтруем PID и строим свою PAT
         self.gen_full = mode in ('broadcast', 'both')
-        self.out_sid = args.out_service_id if (args.out_service_id and self.partial) else (
-            DECK_PROFILES[args.deck_profile]['program'] if mode == 'deck' else
-            1 if mode == 'dtheater' else self.sid)
-        self.tsid = args.ts_id if (args.ts_id is not None and self.partial) else (
-            1 if mode == 'dtheater' else probe.pat['tsid'])
+        self.out_sid = args.out_service_id if (args.out_service_id and self.partial) else self.sid
+        self.tsid = args.ts_id if (args.ts_id is not None and self.partial) else probe.pat['tsid']
         self.pat_version = probe.pat['version']
         self.video_info = {es['pid']: parse_video_info(bytes(probe.es_head.get(es['pid'], b'')), es['type'])
                            for es in self.src_pmt['es'] if es['type'] in VIDEO_TYPES}
@@ -3548,22 +3269,22 @@ class Muxer:
         self.lang = self.caption_langs[0]
         for lg in self.caption_langs:
             if ENCODING == 'utf8':
-                continue                 # TCS=1 sets the scheme itself, any language code goes
+                continue                 # TCS=1 задаёт схему сам, код языка при этом любой
             if lg in (b'eng', b'tgl'):
-                self.warn('caption language %s: per ARIB it switches the receiver to UTF-8 '
-                          'while the text is encoded in JIS -- you would get garbage. Use either '
-                          '--encoding utf8 or --caption-lang jpn' % lg.decode())
+                self.warn('язык субтитров %s: по ARIB он включает в приёмнике разбор UTF-8, '
+                          'а текст кодируется в JIS — будет мусор. Либо --encoding utf8, '
+                          'либо --caption-lang jpn' % lg.decode())
             elif lg in (b'por', b'spa'):
-                self.warn('caption language %s: per ARIB it switches the receiver to the ABNT Latin '
-                          'sets while the text is encoded in JIS. Use --caption-lang jpn' % lg.decode())
+                self.warn('язык субтитров %s: по ARIB он включает латинские наборы ABNT, '
+                          'а текст кодируется в JIS. Ставьте --caption-lang jpn' % lg.decode())
         cap_offsets = split_list(args.offset, float)
         self.cap_tracks = [CaptionTrack(path, sub_list, per_track(self.caption_langs, n, b'jpn'))
                            for n, (path, sub_list) in enumerate(subs)]
         for n, tr in enumerate(self.cap_tracks):
             tr.offset = per_track(cap_offsets, n, 0.0)
         self.captions = bool(self.cap_tracks)
-        # copy-control-only edit: the PMT is patched in place and the rest of the
-        # file is copied byte for byte (the way copyctl.py does it)
+        # правка только битов копирования: PMT патчится на месте, остальной файл
+        # копируется байт в байт (как делает copyctl.py)
         self.copy_only = (copy_control_requested(args) and not subs and not args.audio_tracks
                           and (args.no_partial_ts or args.si == 'keep'))
         self.copy_bits = 0
@@ -3573,26 +3294,11 @@ class Muxer:
         self._setup_caption_es()
         self._setup_superimpose()
         self._setup_pid_map()
-        self.dt_rate = 0
-        if self.dtheater:                      # the tape rate is needed already when building the PMT
-            buckets = probe.buckets[1:-1] or probe.buckets      # 0.5 s buckets
-            counts = [sum(b.values()) for b in buckets] or [0]
-            src_rate = max(counts) * TS * 8 * 2
-            # A source already padded with nulls sets the rate itself: we take its
-            # null slots for the audio and the tables instead of padding again.
-            self.source_is_cbr = any(PID_NULL in b for b in buckets)
-            extra = sum((t.bitrate or t.info.get('kbps', 0)) * 1000 for t in self.new_audio)
-            if args.dtheater_rate:
-                self.dt_rate = args.dtheater_rate * 1e6
-            elif self.source_is_cbr:
-                self.dt_rate = src_rate                    # the source already sets it
-            else:
-                self.dt_rate = min(28.2e6, max((src_rate + extra) * 1.25, 6e6))
         self._rebuild_pmt(self.src_pmt)
-        # SI for the SIT. SDT/EIT/TOT are taken only from a Japanese stream: DVB/ATSC
-        # use a different string encoding and carry UTC rather than JST.
+        # SI для SIT. SDT/EIT/TOT берём только из японского потока: в DVB/ATSC
+        # другая кодировка строк и TOT в UTC, а не в JST.
         if not self.isdb and (probe.sdt or probe.eit or probe.tot):
-            log('The SI in this stream is not Japanese (no ISDB NIT) -- the source SDT/EIT/TOT are not used.')
+            log('SI в потоке не японские (нет ISDB NIT) — исходные SDT/EIT/TOT не используются.')
         self.sdt_descs = probe.sdt.get(self.sid, []) if self.isdb else []
         self.event = probe.eit.get(self.sid) if self.isdb else None
         self.event_version = 0
@@ -3625,12 +3331,11 @@ class Muxer:
         if self.network_id is None:
             self.network_id = 0x0004
             mt = mt or b'BS'
-            if not self.dtheater:              # a tape has no network at all
-                (log if self.gen_full else self.warn)(
-                    'no NIT found: network_id=0x0004, media_type=BS (set --network-id/--media-type)')
+            (log if self.gen_full else self.warn)(
+                'NIT не найдена: network_id=0x0004, media_type=BS (задайте --network-id/--media-type)')
         if mt is None:
             mt = b'BS'
-            self.warn('unknown network_id 0x%04X, media_type=BS (set --media-type)' % self.network_id)
+            self.warn('неизвестный network_id 0x%04X, media_type=BS (задайте --media-type)' % self.network_id)
         self.media_type = mt
         self.peak_rate = self._peak_rate()
         self.generate_sit = mode in ('partial', 'both') and not probe.has_sit
@@ -3638,16 +3343,16 @@ class Muxer:
         self.next_si = {}
         self.sit_version = 0
         self.sit_key = None
-        # timing
+        # время
         self.last_raw = None
         self.T = None
         self.offset = 0
         self.T_first = probe.first_pcr
-        # SRT zero = the earliest audio/video PTS (what ffmpeg/mpv/VLC assume)
+        # «ноль» SRT = самый ранний PTS аудио/видео (так считают ffmpeg/mpv/VLC)
         vp = [probe.first_pts[p] for p in probe.av_pids if p in probe.first_pts]
         if not vp or probe.first_pcr is None:
-            raise SystemExit('no PCR/PTS found for the chosen service')
-        if self.new_audio:                         # audio replaced: zero is the video start
+            raise SystemExit('не найдены PCR/PTS выбранного сервиса')
+        if self.new_audio:                         # звук заменён: «ноль» — начало видео
             vp = [probe.first_pts[es['pid']] for es in self.src_pmt['es']
                   if es['type'] in VIDEO_TYPES and es['pid'] in probe.first_pts] or vp
         rel = [((v - probe.first_pcr + PTS_WRAP // 2) % PTS_WRAP) - PTS_WRAP // 2 for v in vp]
@@ -3665,24 +3370,17 @@ class Muxer:
         self.last_pcr_T = None
         self.since_pcr = 0
         self.peak_rate_seen = (0.0, 0.0)
-        self.nulls = 0
-        self.out_pkts = 0
-        # set earlier from the pre-scan when the source pads itself with nulls
-        self.source_is_cbr = getattr(self, 'source_is_cbr', False)
-        import collections
-        self.cbr_queue = collections.deque()  # our packets waiting for a null slot
         self.tick_per_pkt = 0.0
-        self.pcr_step = 0
         self.bytes_out = 0
 
     def warn(self, msg):
         if msg not in self.warnings:
             self.warnings.append(msg)
-            log('WARNING: ' + msg)
+            log('ПРЕДУПРЕЖДЕНИЕ: ' + msg)
 
-    # -- generated SI ------------------------------------------------------
+    # -- сгенерированные SI ------------------------------------------------
     def _setup_generated_si(self, probe, cs):
-        """Service, event and time for a stream without Japanese SI (or --si-regenerate)."""
+        """Сервис, событие и время для потока без японских SI (или --si-regenerate)."""
         a = self.a
         import os
         stem = os.path.splitext(os.path.basename(a.input))[0]
@@ -3694,11 +3392,11 @@ class Muxer:
             mtime = datetime.datetime.utcfromtimestamp(os.path.getmtime(a.input)) + datetime.timedelta(hours=9)
             start = (mtime - datetime.timedelta(seconds=dur)).replace(microsecond=0)
             self.tot = (start, probe.first_pcr)
-            log('Recording time not given: taken from the file date, start %s JST (set --jst).' % start)
+            log('Время записи не задано: беру из даты файла, начало %s JST (задайте --jst).' % start)
         if self.gen_full and not any(d[0] == 0x48 for d in self.sdt_descs):
             self.sdt_descs.insert(0, service_descriptor(a.service_name or stem[:20], a.provider_name or '', cs))
         if self.isdb and self.event and a.event_name is None:
-            return                                   # keep the source EIT event unless overridden
+            return                                   # событие исходного EIT, если не переопределено
         jst0 = self.jst_at(probe.first_pcr)
         minutes = a.event_duration or max(1, -(-int(dur) // 60))
         descs = list(self.extra_event_descs)
@@ -3718,17 +3416,14 @@ class Muxer:
         self.extra_event_descs = []
 
     def copy_event_descs(self):
-        """0xC1 (and 0xDE if set) for the generated event, as in a broadcast EIT."""
+        """0xC1 (и 0xDE, если задан) для сгенерированного события — как в EIT вещателя."""
         a = self.a
         if not copy_control_requested(a):
             return []
         return apply_copy_control([], a, create=True)
 
     def pat_section(self):
-        if self.deck:                      # program 0 points at the SIT PID
-            progs = [(0, PID_SIT), (self.out_sid, self.out_pmt_pid)]
-        else:
-            progs = ([(0, PID_NIT)] if self.gen_full else []) + [(self.out_sid, self.out_pmt_pid)]
+        progs = ([(0, PID_NIT)] if self.gen_full else []) + [(self.out_sid, self.out_pmt_pid)]
         return build_pat(self.tsid, progs, self.pat_version)
 
     def _ver(self, kind, key):
@@ -3775,9 +3470,9 @@ class Muxer:
             self.next_si[kind] = T + SI_PERIODS[kind] * 90000
 
     def _setup_audio(self):
-        """AAC tracks from --audio/--audio-wav/--audio-aac in the given order.
-        Without --keep-audio the source audio is replaced; with it the new tracks
-        follow the existing ones. Per-track parameters are comma-separated lists."""
+        """Дорожки AAC из --audio/--audio-wav/--audio-aac в заданном порядке.
+        Без --keep-audio исходный звук заменяется, с ним — новые дорожки
+        добавляются после исходных. Параметры по дорожкам — списками через запятую."""
         a = self.a
         self.new_audio, self.old_audio_pids = [], set()
         self.pcr_on_old_audio = False
@@ -3789,7 +3484,7 @@ class Muxer:
         if keep:
             bad = [es_type_name(es['type']) for es in src_audio if es['type'] != 0x0F]
             if bad:
-                self.warn('source audio kept but it is not AAC (%s) -- Japanese receivers will not play it' % ', '.join(bad))
+                self.warn('оставлен исходный звук не AAC (%s) — японские приёмники его не воспроизведут' % ', '.join(bad))
         else:
             self.old_audio_pids = {es['pid'] for es in src_audio}
         n_keep = len(src_audio) if keep else 0
@@ -3816,66 +3511,57 @@ class Muxer:
             bitrate = per_track(bitrates, n, None)
             if bitrate is None:
                 src_ch = want_ch or wav_channels(path)
-                if kind in ('dts', 'dtsfile'):
-                    bitrate = {1: 384, 6: 1510}.get(src_ch, 768)   # 1509.75 on tapes
-                elif kind in ('ac3', 'ac3file'):
-                    bitrate = {1: 96, 6: 576}.get(src_ch, 192)  # 576 for 5.1, as on D-Theater tapes
+                if kind in ('ac3', 'ac3file'):
+                    bitrate = {1: 96, 6: 448}.get(src_ch, 192)  # 448 на 5.1 — как на лентах D-Theater
                 elif kind in ('mp2', 'mp2file'):
-                    bitrate = 192 if src_ch == 1 else 256      # the usual DVB Layer II figures
+                    bitrate = 192 if src_ch == 1 else 256      # обычный для DVB Layer II
                 else:
                     bitrate = {1: 144, 6: 384}.get(src_ch, 256)
             codec = ('pcm' if kind == 'pcm' else 'ac3' if kind in ('ac3', 'ac3file')
-                     else 'dts' if kind in ('dts', 'dtsfile')
                      else 'mp2' if kind in ('mp2', 'mp2file') else 'aac')
             if kind == 'pcm':
-                log('Reading PCM %s ...' % path)
+                log('Читаю PCM %s ...' % path)
                 tr = PcmTrack(read_pcm_48k(path, a.ffmpeg, self.warn), a.pcm_bit_order == 'dvhs')
                 enc = 'pcm'
                 data = None
-            elif kind == 'dts':
-                log('Encoding %s to DTS (%d kbit/s) ...' % (path, bitrate))
-                data, enc = encode_wav_to_dts(path, bitrate, want_ch, self.warn)
             elif kind == 'ac3':
-                log('Encoding %s to AC-3 (%d kbit/s) ...' % (path, bitrate))
+                log('Кодирую звук %s в AC-3 (%d кбит/с) ...' % (path, bitrate))
                 data, enc = encode_wav_to_ac3(path, bitrate, want_ch, self.warn)
             elif kind == 'mp2':
-                log('Encoding %s to MP2 (%d kbit/s) ...' % (path, bitrate))
+                log('Кодирую звук %s в MP2 (%d кбит/с) ...' % (path, bitrate))
                 data, enc = encode_wav_to_mp2(path, a.mp2_encoder, bitrate, want_ch, self.warn)
             elif kind == 'wav':
-                log('Encoding %s (%d kbit/s) ...' % (path, bitrate))
+                log('Кодирую звук %s (%d кбит/с) ...' % (path, bitrate))
                 data, enc = encode_wav_to_adts(path, a.aac_encoder, bitrate, want_ch, self.warn)
             else:
                 data, enc = bytearray(open(path, 'rb').read()), 'file'
-            table = {'mp2': MP2_ENCODER_DELAY, 'ac3': AC3_ENCODER_DELAY,
-                     'dts': DTS_ENCODER_DELAY}.get(codec, AAC_ENCODER_DELAY)
+            table = {'mp2': MP2_ENCODER_DELAY, 'ac3': AC3_ENCODER_DELAY}.get(codec, AAC_ENCODER_DELAY)
             given = per_track(delays, n, None)
             delay = 0 if codec == 'pcm' else (table.get(enc, 0) if given is None else given)
             if enc == 'file' and given is None and codec not in ('mp2', 'pcm'):
-                log('%s: the encoder of a ready-made file is unknown, assuming a delay of %d samples (%.0f ms). '
-                    'If the audio drifts, set --audio-delay-samples' % (path, delay, delay * 1000 / 48000))
+                log('%s: кодировщик готового файла неизвестен, беру задержку %d отсч. (%.0f мс). '
+                    'Если звук уедет — задайте --audio-delay-samples' % (path, delay, delay * 1000 / 48000))
             if codec != 'pcm':
                 tr = AudioTrack(data, enc, delay, codec)
             else:
                 tr.delay = delay
             if tr.info['rate'] != 48000:
-                self.warn('%s: %d Hz (BS audio is 48 kHz)' % (path, tr.info['rate']))
-            if codec == 'dts':
-                log('%s: DTS Coherent Acoustics, stream_type 0x82 -- found on some D-Theater tapes' % path)
-            elif codec == 'ac3':
-                log('%s: Dolby Digital (AC-3), stream_type 0x81 -- the audio found on D-Theater tapes' % path)
+                self.warn('%s: %d Гц (на BS звук 48 кГц)' % (path, tr.info['rate']))
+            if codec == 'ac3':
+                log('%s: Dolby Digital (AC-3), stream_type 0x81 — такой звук на лентах D-Theater' % path)
             elif codec == 'pcm':
-                log('%s: linear PCM (SMPTE 302M), stream_type 0x83 -- what a deck writes in STD mode; '
-                    'bit order: %s' % (path, 'D-VHS' if tr.status_first else 'ffmpeg'))
+                log('%s: линейный PCM (SMPTE 302M), stream_type 0x83 — как пишет дека в режиме STD; '
+                    'порядок бит: %s' % (path, 'D-VHS' if tr.status_first else 'ffmpeg'))
             elif codec == 'mp2':
-                log('%s: MPEG-1 Layer II, stream_type 0x%02X -- for decks that do not understand AAC; '
-                    'Japanese receivers ignore such a track' % (path, tr.stream_type))
+                log('%s: MPEG-1 Layer II, stream_type 0x%02X — для дек, не понимающих AAC; '
+                    'японские приёмники такую дорожку игнорируют' % (path, tr.stream_type))
 
             if tr.info['ch'] == 6 and codec != 'mp2':
-                log('%s: 5.1 (3/2+LFE) -- the receiver must handle multichannel AAC; '
-                    'on a stereo output it will downmix by itself' % path)
+                log('%s: 5.1 (3/2+LFE) — приёмник должен уметь многоканальный AAC; '
+                    'на стереовыходе он сведёт сам' % path)
             if codec != 'mp2' and not tr.info['mpeg2']:
-                self.warn('%s: MPEG-4 ADTS with CRC -- the ID bit is left alone (it would break the CRC); '
-                          'to match broadcast use a WAV input or fdkaac -p 129' % path)
+                self.warn('%s: MPEG-4 ADTS с CRC — бит ID не меняю (сломался бы CRC); как в эфире будет из WAV '
+                          'или из fdkaac -p 129' % path)
             if a.arib_pids and self.partial:
                 pid = 0x0110 + n_keep + n
             elif n < len(old):
@@ -3888,7 +3574,7 @@ class Muxer:
             while next_tag in reserved_tags or next_tag in {t.tag for t in self.new_audio}:
                 next_tag += 1
             if next_tag > 0x2F:
-                raise SystemExit('too many audio tracks (component_tag 0x10-0x2F)')
+                raise SystemExit('слишком много звуковых дорожек (component_tag 0x10–0x2F)')
             tr.pid, tr.tag, tr.path, tr.kind = pid, next_tag, path, kind
             tr.offset = per_track(offsets, n, 0.0)
             tr.name = a.audio_name[n] if a.audio_name and n < len(a.audio_name) else None
@@ -3901,33 +3587,8 @@ class Muxer:
         self.pcr_on_old_audio = self.src_pmt['pcr_pid'] in self.old_audio_pids
 
     def _setup_pid_map(self):
-        """--arib-pids: PMT 0x01F0, video 0x0100.., audio 0x0110.., separate PCR 0x01FF, as on BS."""
+        """--arib-pids: PMT 0x01F0, видео 0x0100.., звук 0x0110.., отдельный PCR 0x01FF — как на BS."""
         self.pid_map = {}
-        if self.dtheater:
-            src = self.src_pmt
-            # The deck numbers its own recordings differently from a tape:
-            # PMT 0x006E, video 0x1000, audio 0x1001, captions 0x1010.
-            pr = self.prof
-            want = {self.pmt_pid: pr['pmt'] if pr else 0x0010}
-            nv, na = (pr['video'], pr['audio']) if pr else (0x0011, 0x0014)
-            for es in src['es']:
-                if es['type'] in VIDEO_TYPES:
-                    want[es['pid']], nv = nv, nv + 1
-            for t in self.new_audio:
-                t.pid, na = na, na + 1        # give tape PIDs straight away, no remapping
-            for es in src['es']:
-                if is_audio_es(es) and es['pid'] not in want and es['pid'] not in self.old_audio_pids:
-                    want[es['pid']], na = na, na + 1
-            taken = set()
-            for old, new in want.items():
-                if new not in taken:
-                    self.pid_map[old] = new
-                    taken.add(new)
-            if self.deck:
-                for n, tr in enumerate(self.cap_tracks):
-                    tr.pid = self.prof['captions'] + n
-            self.out_pmt_pid = self.pid_map.get(self.pmt_pid, self.pmt_pid)
-            return
         if not (self.a.arib_pids and self.partial):
             self.out_pmt_pid = self.pmt_pid
             return
@@ -3950,49 +3611,38 @@ class Muxer:
         self.out_pmt_pid = self.pid_map.get(self.pmt_pid, self.pmt_pid)
 
     def check_dvhs_audio(self, tr, path):
-        """The requirements of IEC 60774-5 (D-VHS), annex A.2.8 -- what a deck expects."""
+        """Требования IEC 60774-5 (D-VHS), приложение A.2.8 — то, чего ждёт дека."""
         i = tr.info
         if tr.codec == 'pcm':
             if i['rate'] != 48000 or i['ch'] != 2:
-                self.warn('%s: D-VHS wants exactly 48 kHz and two channels for PCM' % path)
-            return
-        if tr.codec == 'dts':
-            if i['rate'] != 48000:
-                self.warn('%s: %d Hz; D-VHS wants 48 kHz for DTS' % (path, i['rate']))
-            if not 188 <= i['kbps'] <= 1510:
-                self.warn('%s: %d kbit/s is outside the D-VHS range of 188.25-1509.75 for DTS'
-                          % (path, i['kbps']))
-            if i['spf'] != 512:
-                self.warn('%s: frame of %d samples; D-VHS wants 512' % (path, i['spf']))
-            if i['amode'] == 1:
-                self.warn('%s: mode 1+1 is not among the modes D-VHS lists for DTS' % path)
+                self.warn('%s: D-VHS требует для PCM ровно 48 кГц и два канала' % path)
             return
         if tr.codec == 'ac3':
             if i['rate'] != 48000:
-                self.warn('%s: %d Hz; D-VHS wants 48 kHz for AC-3' % (path, i['rate']))
+                self.warn('%s: %d Гц; D-VHS требует для AC-3 48 кГц' % (path, i['rate']))
             if i['kbps'] > 640:
-                self.warn('%s: %d kbit/s is above the 640 limit for AC-3' % (path, i['kbps']))
+                self.warn('%s: %d кбит/с — выше предела 640 для AC-3' % (path, i['kbps']))
             if i['acmod'] == 0:
-                self.warn('%s: mode 1+1 is forbidden by D-VHS' % path)
+                self.warn('%s: режим 1+1 стандартом D-VHS запрещён' % path)
             return
         if i['rate'] not in (32000, 44100, 48000):
-            self.warn('%s: sample rate %d Hz; D-VHS allows 32, 44.1 and 48 kHz' % (path, i['rate']))
+            self.warn('%s: частота %d Гц; D-VHS допускает 32, 44,1 и 48 кГц' % (path, i['rate']))
         if not i['crc']:
-            self.warn('%s: no CRC in the stream, D-VHS requires one' % path)
+            self.warn('%s: в потоке нет CRC, а D-VHS его требует' % path)
         if tr.codec == 'mp2':
             limit = 384 if i['ch'] > 1 else 384
             if i['kbps'] > limit:
-                self.warn('%s: %d kbit/s for Layer II is above the D-VHS limit without the extension' % (path, i['kbps']))
+                self.warn('%s: %d кбит/с для Layer II выше предела D-VHS без расширения' % (path, i['kbps']))
             return
         if i.get('profile') != 2:
-            self.warn('%s: the AAC profile is not LC, which D-VHS requires' % path)
+            self.warn('%s: профиль AAC не LC, а D-VHS требует именно его' % path)
         if i.get('buffer_fullness') == 0x7FF:
-            self.warn('%s: adts_buffer_fullness = 0x7FF (variable bit rate); '
-                      'D-VHS forbids it -- use fdkaac or a constant bit rate' % path)
+            self.warn('%s: adts_buffer_fullness = 0x7FF (переменный битрейт); '
+                      'D-VHS это запрещает — кодируйте fdkaac или задайте постоянный битрейт' % path)
         if i.get('blocks', 1) != 1:
-            self.warn('%s: more than one raw_data_block per ADTS frame, D-VHS wants one' % path)
+            self.warn('%s: в кадре ADTS больше одного raw_data_block, D-VHS требует один' % path)
         if tr.bitrate and i['ch'] and tr.bitrate > 288 * i['ch']:
-            self.warn('%s: %d kbit/s is above 288 per channel, the D-VHS limit for AAC' % (path, tr.bitrate))
+            self.warn('%s: %d кбит/с — больше 288 на канал, предел D-VHS для AAC' % (path, tr.bitrate))
 
     def _setup_superimpose(self):
         self.sup_pid = None
@@ -4010,9 +3660,9 @@ class Muxer:
 
     # -- PMT ----------------------------------------------------------------
     def _setup_caption_es(self):
-        """PID and component_tag per track: 0x30.. are captions (caption 1, caption 2...)."""
+        """PID и component_tag каждой дорожке: 0x30.. — субтитры (字幕1, 字幕2...)."""
         self.replaced_pid = None
-        if not self.captions:                  # remux only: any source captions stay
+        if not self.captions:                  # только перемукс: исходные субтитры (если есть) остаются
             self.cap_pid = self.cap_tag = None
             return
         existing = [e for e in self.src_pmt['es'] if is_caption_es(e)]
@@ -4022,16 +3672,16 @@ class Muxer:
         want_pids = split_list(self.a.caption_pid, lambda v: int(v, 0))
         replacing = existing and self.a.existing == 'replace'
         if replacing:
-            log('The stream already carries ARIB captions (%s) -- replacing them with ours.'
+            log('В потоке уже есть субтитры ARIB (%s) — заменяю их своими.'
                 % ', '.join('PID 0x%04X' % e['pid'] for e in existing[:len(self.cap_tracks)]))
         elif existing:
-            log('Captions already present (PID 0x%04X) -- adding ours as separate ES.' % existing[0]['pid'])
+            log('Субтитры уже есть (PID 0x%04X) — добавляю свои отдельными ES.' % existing[0]['pid'])
         free_tags = [t for t in range(0x30, 0x38) if t not in used_tags]
         if self.a.caption_multi == 'lang' and len(self.cap_tracks) > 1:
-            # ARIB: several languages live in one ES, told apart by data_group_id
+            # ARIB: несколько языков живут в одном ES, различаясь data_group_id
             if len(self.cap_tracks) > 2:
-                self.warn('one ARIB caption ES carries at most two languages (caption 1 and 2); '
-                          'the extra tracks were dropped -- or use --caption-multi es')
+                self.warn('в одном ES ARIB несёт не больше двух языков (字幕1 и 字幕2); '
+                          'лишние дорожки отброшены — либо используйте --caption-multi es')
                 self.cap_tracks = self.cap_tracks[:2]
             head = self.cap_tracks[0]
             old = existing[0] if replacing else None
@@ -4060,7 +3710,7 @@ class Muxer:
                 tr.pid = per_track(want_pids, n, None) or old['pid']
             else:
                 if not free_tags:
-                    raise SystemExit('ARIB allows at most 8 caption ES (component_tag 0x30-0x37)')
+                    raise SystemExit('больше 8 субтитровых ES ARIB не допускает (component_tag 0x30–0x37)')
                 tr.tag = free_tags.pop(0)
                 pid = per_track(want_pids, n, None) or (0x0100 + tr.tag)
                 while pid in used_pids | {t.pid for t in self.cap_tracks[:n]}:
@@ -4071,28 +3721,8 @@ class Muxer:
         self.cap_pid, self.cap_tag = self.cap_tracks[0].pid, self.cap_tracks[0].tag
 
     def _rebuild_pmt(self, src):
-        if self.dtheater:
-            descs = [d for d in src['descs'] if d[0] not in (0x05, 0x88, 0x0E, 0x10, 0xC1, 0xDE, 0x09)]
-            a = self.a
-            rate = int(self.dt_rate)
-            dtcp = dtcp_descriptor(DTCP_CCI[a.dtcp_cci], 0 if a.dtcp_epn_asserted else 1,
-                                   0 if a.dtcp_no_image_constraint else 1, a.dtcp_aps)
-            if self.deck:
-                # A deck recording carries MTRM, maximum_bitrate and DTCP -- and no
-                # smoothing_buffer, unlike a factory tape; a Hitachi adds ARIB 0xC1.
-                pr = self.prof
-                parts = {'mtrm': mtrm_descriptor(*pr['mtrm']),
-                         'maxbr': maximum_bitrate_descriptor(pr['maxbr'] or rate),
-                         'dtcp': dtcp, 'c1': pr['c1']}
-                descs = [parts[k] for k in pr['pmt_order'] if parts[k]] + descs
-            else:
-                descs = [mtrm_descriptor(), dtcp, maximum_bitrate_descriptor(rate),
-                         smoothing_buffer_descriptor(rate, a.smoothing_buffer)] + descs
-            info = {'program': self.out_sid,
-                    'pcr_pid': self.pcr_out_pid or src['pcr_pid'], 'descs': descs, 'es': []}
-        else:
-            info = {'program': self.out_sid, 'pcr_pid': src['pcr_pid'],
-                    'descs': apply_copy_control(src['descs'], self.a, create=True), 'es': []}
+        info = {'program': self.out_sid, 'pcr_pid': src['pcr_pid'],
+                'descs': apply_copy_control(src['descs'], self.a, create=True), 'es': []}
         strip_ca = self.partial and not self.a.keep_ca
         if strip_ca:
             info['descs'] = [d for d in info['descs'] if d[0] != 0x09]
@@ -4102,24 +3732,15 @@ class Muxer:
             if tr.pid in seen_cap:
                 continue
             seen_cap.add(tr.pid)
-            extra = b'\xfd\x03\x00\x08\xff' if self.deck else b'\xfd\x03\x00\x08\x3d'
             cap_es.append({'type': 0x06, 'pid': tr.pid,
-                           'descs': [bytes((0x52, 1, tr.tag)), extra]})
+                           'descs': [bytes((0x52, 1, tr.tag)), b'\xfd\x03\x00\x08\x3d']})
         replaced = {tr.replaced_pid: es for tr, es in zip(self.cap_tracks, cap_es) if tr.replaced_pid is not None}
         next_tag = {'v': 0x00, 'a': 0x10}
         inserted = False
         drop_types = {0x0D, 0x0B} if self.a.drop_data else set()
         audio_done = False
-        new_audio_es = []
-        for t in self.new_audio:
-            d = [bytes((0x52, 1, t.tag))]
-            if t.codec == 'ac3':
-                d.append(b'\x05\x04AC-3')        # as on a D-Theater tape
-            elif t.codec == 'dts':
-                d.append(b'\x05\x04DTS ')        # the identifier is padded with a space
-            elif t.codec == 'pcm':
-                d.append(b'\x05\x04BSSD')        # as the deck marks its own PCM track
-            new_audio_es.append({'type': t.stream_type, 'pid': t.pid, 'descs': d})
+        new_audio_es = [{'type': t.stream_type, 'pid': t.pid, 'descs': [bytes((0x52, 1, t.tag))]}
+                        for t in self.new_audio]
         for es in src['es']:
             if es['type'] in drop_types:
                 continue
@@ -4134,11 +3755,8 @@ class Muxer:
                 continue
             descs = apply_copy_control([d for d in es['descs'] if not (strip_ca and d[0] == 0x09)], self.a)
             vi = self.video_info.get(es['pid'])
-            if self.dtheater:
-                descs = [d for d in descs if d[0] not in (0xC8, 0xC1, 0xDE, 0xFD, 0x09)]
-            if self.partial and not self.dtheater and es['type'] == 0x02 and vi and 'h' in vi \
-                    and not any(d[0] == 0xC8 for d in descs):
-                fmt = video_component_type(vi)[1]         # video_decode_control_descriptor, as on BS
+            if self.partial and es['type'] == 0x02 and vi and 'h' in vi and not any(d[0] == 0xC8 for d in descs):
+                fmt = video_component_type(vi)[1]         # video_decode_control_descriptor, как на BS
                 descs.append(bytes((0xC8, 1, 0x40 | (fmt << 2) | 3)))
             if self.partial and component_tag(es) is None:
                 kind = 'v' if es['type'] in VIDEO_TYPES else 'a' if es['type'] in AUDIO_TYPES else None
@@ -4150,7 +3768,7 @@ class Muxer:
             pos = max((i + 1 for i, e in enumerate(info['es']) if is_audio_es(e)), default=0) or \
                 max((i + 1 for i, e in enumerate(info['es']) if e['type'] in VIDEO_TYPES), default=0)
             info['es'][pos:pos] = new_audio_es
-        if self.a.audio_lang_pmt and self.partial:        # ISO_639_language_descriptor, for players
+        if self.a.audio_lang_pmt and self.partial:        # ISO_639_language_descriptor — для плееров
             n = 0
             for es in info['es']:
                 if is_audio_es(es):
@@ -4184,7 +3802,7 @@ class Muxer:
         self.keep_pids -= {t.pid for t in self.new_audio}
         self.src_pmt_version = src['version']
 
-    # -- caption schedule --------------------------------------------------
+    # -- расписание субтитров ---------------------------------------------
     def _peak_rate(self):
         if self.a.peak_rate:
             return int(self.a.peak_rate * 1e6)
@@ -4200,42 +3818,6 @@ class Muxer:
             return None
         dt, pcr_then = self.tot
         return dt + datetime.timedelta(seconds=(T - pcr_then) / 90000)
-
-    def build_deck_sit(self):
-        """The SIT an HM-DH30000 writes: a partial_transport_stream_descriptor in
-        the transmission loop and component/data_content descriptors per service.
-        No network_identification, no partial_TS_time, no service name."""
-        tinfo = partial_ts_descriptor(int(self.dt_rate))
-        pr = self.prof
-        descs = []
-        n_audio = 0
-        if pr['sit'] == 'empty':          # a Hitachi keeps the service loop empty
-            body = bytes((0xF0 | (len(tinfo) >> 8), len(tinfo) & 255)) + tinfo
-            body += self.out_sid.to_bytes(2, 'big') + bytes((0x80 | (pr['running'] << 4), 0))
-            return long_section(0x7F, 0xFFFF, self.sit_version, body, private=True)
-        lang = pr['lang']
-        for es in self.pmt_info['es']:
-            tag = component_tag(es)
-            if tag is None:
-                continue
-            if es['type'] in VIDEO_TYPES:
-                vi = self.video_info.get(es['pid'], {})
-                descs.append(component_descriptor(0x01, video_component_type(vi)[0] & 0x0F or 0x01,
-                                                  tag, lang or self.audio_langs[0]))
-            elif is_audio_es(es):
-                a = self.audio_info.get(es['pid'], {})
-                ctype = {1: 0x01, 2: 0x03}.get(a.get('ch', 2), 0x09 if a.get('ch', 2) >= 6 else 0x03)
-                descs.append(component_descriptor(0x02, ctype, tag,
-                                                  lang or per_track(self.audio_langs, n_audio, b'jpn')))
-                n_audio += 1
-        if pr['sit'] == 'full':
-            for tr in self.cap_tracks:
-                descs.append(deck_data_content_descriptor(tr.tag, tr.lang))
-        d = b''.join(descs)
-        body = bytes((0xF0 | (len(tinfo) >> 8), len(tinfo) & 255)) + tinfo
-        body += self.out_sid.to_bytes(2, 'big') + bytes((0x80 | (pr['running'] << 4) | (len(d) >> 8),
-                                                         len(d) & 255)) + d
-        return long_section(0x7F, 0xFFFF, self.sit_version, body, private=True)
 
     def build_sit(self, T):
         tinfo = partial_ts_descriptor(self.peak_rate) + network_identification_descriptor(self.network_id, self.media_type)
@@ -4265,22 +3847,13 @@ class Muxer:
             if idx is None:
                 idx = len(body_descs) - 1
             del body_descs[idx]
-            self.warn('SIT above 4096 bytes: some event descriptors were dropped')
+            self.warn('SIT больше 4096 байт: часть дескрипторов события отброшена')
         return long_section(0x7F, 0xFFFF, self.sit_version, body, private=True)
 
-    # -- output -------------------------------------------------------------
+    # -- вывод --------------------------------------------------------------
     def emit(self, out, pid, data):
-        n = len(data) // TS
-        self.stats[pid] = self.stats.get(pid, 0) + n
-        if self.source_is_cbr:
-            # One of our packets per null slot of the source, in order: dropping a
-            # whole PES into a single slot would push the video later and raise the
-            # instantaneous rate above what the encoder set.
-            for k in range(n):
-                self.cbr_queue.append(bytes(data[k * TS:(k + 1) * TS]))
-            return
         out += data
-        self.out_pkts += n
+        self.stats[pid] = self.stats.get(pid, 0) + len(data) // TS
 
     def emit_psi(self, out, T):
         if self.partial:
@@ -4300,15 +3873,14 @@ class Muxer:
                 self.T += d
             else:
                 self.T += 3000
-                self.warn('PCR discontinuity -- a DIT was inserted; caption timing follows the continuous scale')
+                self.warn('разрыв PCR — вставлена DIT; тайминг субтитров отсчитывается по непрерывному времени')
                 if self.partial:
                     self.emit(out, PID_DIT, section_packets(PID_DIT, dit_section(True), self.cc))
                 self.emit_psi(out, self.T)
         if self.last_pcr_T is not None and self.since_pcr:
             dT = self.T - self.last_pcr_T
-            if 0 < dT <= 90000:                        # ticks per packet
+            if 0 < dT <= 90000:                        # тиков на один пакет
                 self.tick_per_pkt = dT / self.since_pcr
-                self.pcr_step = dT
                 rate = self.since_pcr * TS * 8 / (dT / 90000.0)
                 if rate > self.peak_rate_seen[0]:
                     self.peak_rate_seen = (rate, (self.last_pcr_T - (self.T_first or 0)) / 90000.0)
@@ -4317,95 +3889,18 @@ class Muxer:
         self.last_raw = raw
         self.offset = self.T - raw
 
-    # -- a dedicated PCR PID ------------------------------------------------
-    def out_pos(self, out):
-        return (self.bytes_out + len(out)) // TS
-
-    def pcr_anchor_at(self, out, value27):
-        """A source PCR seen at this output position. The first one anchors the
-        output timeline; later ones refine the packet period over a long baseline
-        (exact for a constant-rate source). A jump re-anchors, as at a splice."""
-        q, s = self.out_pos(out), self.src_count
-        a = self.pcr_anchor
-        if a is not None and self.tick27:
-            predicted = a[1] + (q - a[0]) * self.tick27
-            if abs(value27 - predicted) > 27000 * 100:      # more than 100 ms off
-                a = None
-        if a is None:
-            self.pcr_anchor = (q, value27, s, value27)
-            self.pcr_discontinuity = self.tick27 is not None
-            return
-        if s > a[2]:
-            self.tick27 = (value27 - a[3]) / (s - a[2])
-
-    def write_pcr(self, out, value27=None):
-        """value27 given: a variable-rate source, where only the source's own PCR
-        tells the time. Otherwise the value comes from the output timeline."""
-        a = self.pcr_anchor
-        if a is None and value27 is None:
-            return
-        q = self.out_pos(out)
-        tick = self.tick27 or self.tick_per_pkt * 300
-        if value27 is None:
-            value27 = a[1] + (q - a[0]) * tick
-        pkt = bytearray(pcr_packet(self.pcr_out_pid, int(round(value27))))
-        if self.pcr_discontinuity:
-            pkt[5] |= 0x80                  # discontinuity_indicator
-            self.pcr_discontinuity = False
-        out += pkt
-        self.stats[self.pcr_out_pid] = self.stats.get(self.pcr_out_pid, 0) + 1
-        self.out_pkts += 1
-        self.last_pcr_pos = q
-
-    def pcr_overdue(self, out, hard):
-        if self.pcr_anchor is None or not (self.tick27 or self.tick_per_pkt):
-            return False
-        tick = self.tick27 or self.tick_per_pkt * 300
-        since = (self.out_pos(out) - self.last_pcr_pos) * tick / 27000.0   # ms
-        period = self.prof['pcr_period'] * 1000
-        return since >= (period + 8 if hard else period)
-
-    def cbr_slot(self, out):
-        """Fill one free slot of a constant-rate source."""
-        if self.extra > 0:
-            self.extra -= 1                 # pays for a PCR that could not wait
-            return
-        if self.pcr_out_pid and self.pcr_overdue(out, hard=False):
-            self.write_pcr(out)
-            return
-        if self.T is not None:
-            ahead = min(int(self.since_pcr * self.tick_per_pkt), self.pcr_step // 4)
-            self.schedule(out, self.T + ahead)
-        if self.cbr_queue:
-            out += self.cbr_queue.popleft()
-        else:
-            out += null_packet(self.cc.next(PID_NULL))
-        self.out_pkts += 1
-
-    def pad_cbr(self, out):
-        """A tape records at a constant rate, so the stream is padded with null
-        packets: the demo tape carries 8.9 % of them."""
-        if self.T_start_out is None or self.source_is_cbr:
-            return
-        elapsed = (self.T - self.T_start_out) / 90000.0
-        want = int(elapsed * self.dt_rate / (TS * 8))
-        while self.out_pkts < want:
-            out += null_packet(self.cc.next(PID_NULL))
-            self.out_pkts += 1
-            self.nulls += 1
-
     def schedule(self, out, T=None):
-        """Sends whatever is due. Called on every output packet with the time
-        interpolated between PCRs, and sends at most one PES per stream per call --
-        otherwise a burst reaches the tape that the deck cannot record (the HS
-        limit is 28.2 Mbit/s)."""
+        """Отправка того, чей срок подошёл. Вызывается на каждом выходном пакете
+        с временем, интерполированным между PCR, и за один вызов отправляет не
+        больше одного PES на поток — иначе на ленту уходит всплеск, который
+        дека не успевает записать (предел HS — 28,2 Мбит/с)."""
         if T is None:
             T = self.T
         if self.T_start_out is None:
             self.T_start_out = T
             self.next_mgmt = T
             self.next_sit = T + int(self.a.sit_interval * 90000)
-            # captions that ended before the file starts are skipped
+            # субтитры, закончившиеся до начала файла, пропускаем
             for tr in self.cap_tracks:
                 tr.skipped = sum(1 for e in tr.events if e[3] == 'show' and e[4] <= T)
                 tr.events = [e for e in tr.events if e[4] > T]
@@ -4414,22 +3909,14 @@ class Muxer:
         if self.generate_sit and T >= self.next_sit:
             self.emit(out, PID_SIT, section_packets(PID_SIT, self.build_sit(T), self.cc))
             self.next_sit = T + int(self.a.sit_interval * 90000)
-        if self.dtheater and T >= getattr(self, 'next_psi', 0):
-            self.emit(out, PID_PAT, section_packets(PID_PAT, self.pat_section(), self.cc))
-            self.emit(out, self.out_pmt_pid, section_packets(self.out_pmt_pid, self.pmt_section, self.cc))
-            if self.deck and (not self.prof['sit_period'] or T >= getattr(self, 'next_deck_sit', 0)):
-                self.emit(out, PID_SIT, section_packets(PID_SIT, self.build_deck_sit(), self.cc))
-                if self.prof['sit_period']:
-                    self.next_deck_sit = T + int(self.prof['sit_period'] * 90000)
-            self.next_psi = T + int(self.a.psi_interval * 90000)
         if self.gen_full:
             due = [k for k in SI_PERIODS if T >= self.next_si.get(k, 0)]
             if due:
-                self.emit_si(out, T, due[:1])          # one table at a time
+                self.emit_si(out, T, due[:1])          # по одной таблице за раз
         for tr in self.new_audio:
             if tr.codec == 'pcm':
-                # a linear PCM PES is about 44 packets; hand them out evenly across
-                # the chunk duration, the way the deck does (at most 2 in a row)
+                # PES линейного PCM — это ~44 пакета; раздаём их равномерно
+                # по длительности куска, как делает дека (у неё максимум 2 подряд)
                 if not tr.pending and tr.next < tr.nchunks and tr.deliver_time(tr.next) <= T:
                     data = pes_packets(tr.pid, tr.pes(tr.next, self.offset), self.cc)
                     pkts = [data[i:i + TS] for i in range(0, len(data), TS)]
@@ -4463,7 +3950,7 @@ class Muxer:
                 tr.count[kind] += 1
 
     def run_copy_only(self, out_path):
-        """Patch only 0xC1/0xDE in the PMT, copy everything else byte for byte."""
+        """Меняем только 0xC1/0xDE в PMT, всё остальное копируем байт в байт."""
         split = 0
         with open(out_path, 'wb') as fo:
             chunk = bytearray()
@@ -4483,7 +3970,7 @@ class Muxer:
             fo.write(chunk)
             self.bytes_out += len(chunk)
         if split:
-            self.warn('%d PMT sections span several packets and were left alone' % split)
+            self.warn('%d секций PMT занимают несколько пакетов и оставлены без изменений' % split)
 
     def run(self, out_path):
         a = self.a
@@ -4493,19 +3980,14 @@ class Muxer:
         out = bytearray()
         fo = open(out_path, 'wb')
         self.emit_psi(out, self.T_first)
-        if self.deck and self.prof['dit']:
-            self.emit(out, PID_DIT, section_packets(PID_DIT, dit_section(True), self.cc))
-        # the source's own PCR PID: with a dedicated output PCR PID the PMT names the
-        # new one, but time still has to be read from where the source carries it
-        pcr_pid = self.src_pmt['pcr_pid']
+        pcr_pid = self.pmt_info['pcr_pid']
         for pkt in iter_packets(a.input):
             pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
             pcr = None
-            start_len = len(out)
             if pid == pcr_pid and pkt[3] & 0x20:
                 pcr = read_pcr(pkt)
                 if pcr is not None:
-                    self.on_pcr(pcr, out)       # time; on a discontinuity a DIT goes first
+                    self.on_pcr(pcr, out)       # время; при разрыве — DIT перед пакетом
             if pid in watch:
                 pl = payload_of(pkt)
                 if pl is not None:
@@ -4513,9 +3995,7 @@ class Muxer:
                         self._on_section(pid, sec)
             keep = True
             if pid == PID_PAT:
-                if self.dtheater:
-                    keep = False
-                elif self.partial:
+                if self.partial:
                     keep = False
                     if pkt[1] & 0x40:
                         self.emit(out, PID_PAT, section_packets(PID_PAT, self.pat_section(), self.cc))
@@ -4528,7 +4008,7 @@ class Muxer:
                     pkt = None
             elif pid == self.pmt_pid:
                 keep = False
-                if pkt[1] & 0x40 and not self.dtheater:
+                if pkt[1] & 0x40:
                     self.emit(out, self.out_pmt_pid, section_packets(self.out_pmt_pid, self.pmt_section, self.cc))
             elif pid in self.old_audio_pids:
                 keep = False
@@ -4539,33 +4019,9 @@ class Muxer:
                     self.stats[np] = self.stats.get(np, 0) + 1
             elif pid in cap_pids or pid == self.sup_pid:
                 keep = False
-            elif pid == PID_NULL and self.dtheater:
-                self.source_is_cbr = True
-                keep = False                  # a free slot; filled below
             elif self.partial and (pid not in self.keep_pids or (pid == PID_SIT and self.generate_sit)):
                 keep = False
-            if self.dtheater and self.T is not None:
-                self.pad_cbr(out)
-            self.src_count += 1
-            if self.source_is_cbr and self.dtheater and not keep and pkt is not None \
-                    and len(out) == start_len:
-                # Anything the source had here -- a null, its own PAT or PMT -- leaves
-                # a slot, and every slot is filled: positions stay exactly as the
-                # encoder set them, so the PCR stays exact too.
-                self.cbr_slot(out)
-            split_pcr = None
-            if keep and self.pcr_out_pid and pid == pcr_pid:
-                split_pcr = read_pcr27(pkt)
-                if split_pcr is not None:
-                    pkt = strip_pcr(pkt)        # the PCR moves to its own PID
-            if keep and self.source_is_cbr and self.pcr_out_pid and self.pcr_overdue(out, hard=True):
-                # no free slot in time: insert the PCR anyway and leave the next
-                # free slot out to pay for it
-                self.write_pcr(out)
-                self.extra += 1
             if keep:
-                if split_pcr is not None:
-                    self.pcr_anchor_at(out, split_pcr)
                 np = self.pid_map.get(pid)
                 if np is not None:
                     out += bytes((0x47, (pkt[1] & 0xE0) | (np >> 8), np & 255))
@@ -4574,30 +4030,18 @@ class Muxer:
                 else:
                     out += pkt
                 self.stats[pid] = self.stats.get(pid, 0) + 1
-                self.out_pkts += 1
-                if split_pcr is not None and not self.source_is_cbr:
-                    # a variable-rate source: right after it, one packet later
-                    self.write_pcr(out, split_pcr + (self.tick_per_pkt * 300 or 0))
             self.since_pcr += 1
-            # Schedule only next to a packet we actually wrote: a run of dropped
-            # source packets would otherwise let our own PES pile into a burst.
-            if self.source_is_cbr:
-                pass                      # a constant-rate source is served at its null slots
-            elif self.T is not None and keep:
-                # The interpolation must not run past the next PCR: with uneven
-                # video packing it would otherwise hand the audio out early and
-                # overfill the receiver's elementary stream buffer.
-                ahead = min(int(self.since_pcr * self.tick_per_pkt), self.pcr_step // 4)
-                self.schedule(out, self.T + ahead)
+            if self.T is not None:
+                self.schedule(out, self.T + int(self.since_pcr * self.tick_per_pkt))
             if len(out) >= 16 * 1024 * 1024:
                 fo.write(out)
                 self.bytes_out += len(out)
                 out = bytearray()
-        for tr in self.new_audio:                    # the last audio frame in full
+        for tr in self.new_audio:                    # последний кадр звука — целиком
             tail = tr.tail_pes(self.offset)
             if tail:
                 self.emit(out, tr.pid, pes_packets(tr.pid, tail, self.cc))
-        # tail: the remaining screen clears
+        # хвост: оставшиеся «очистки» экрана
         if self.T is not None:
             for tr in self.cap_tracks:
                 while tr.events:
@@ -4607,15 +4051,12 @@ class Muxer:
                         tr.count[kind] += 1
                     elif kind == 'show':
                         tr.skipped += 1
-        while self.cbr_queue:                        # whatever did not find a null slot
-            out += self.cbr_queue.popleft()
-            self.out_pkts += 1
         fo.write(out)
         self.bytes_out += len(out)
         fo.close()
 
     def _patch_pmt_packet(self, pkt):
-        """A PMT section wholly inside one packet -> patch in place, otherwise None."""
+        """Секция PMT целиком в одном пакете -> патчим на месте, иначе None."""
         if not pkt[1] & 0x40:
             return None
         pl = payload_of(pkt)
@@ -4627,7 +4068,7 @@ class Muxer:
             return None
         n = 3 + (((pl[sec_start + 1] & 0x0F) << 8) | pl[sec_start + 2])
         if sec_start + n > len(pl):
-            self.warn('the PMT section does not fit one packet -- its copy bits were left unchanged')
+            self.warn('секция PMT не помещается в один пакет — биты копирования в ней не изменены')
             return None
         sec = bytes(pl[sec_start:sec_start + n])
         self.copy_before.update({k: v for k, v in copy_control_values(parse_pmt(sec)['descs']).items()
@@ -4665,66 +4106,64 @@ class Muxer:
                 self.tot = (dt, self.T)
 
     def warn_output_protection(self, vals):
-        """"Free plus protected output" is set by the encryption_mode bit of
-        descriptor 0xDE, not by 0xC1."""
+        """«Свободно + выход под защитой» задаётся не в 0xC1, а битом
+        encryption_mode дескриптора 0xDE."""
         c1 = vals.get(0xC1)
         if c1 is None or (c1 >> 6) != 0 or ((c1 >> 2) & 3) != 0b01:
             return
         de = vals.get(0xDE)
         if de is None or de & 1:
-            self.warn('copy_control_type = 01 with "copy free" does not protect the output by itself: '
-                      'descriptor 0xDE with encryption_mode = 0 is needed. The --epn option is the easy way')
+            self.warn('copy_control_type = 01 при «копирование свободно» сам по себе выход не защищает: '
+                      'нужен дескриптор 0xDE с encryption_mode = 0. Проще всего ключом --epn')
 
     def report(self):
         if self.copy_only:
-            log('Copy-control edit, PMT PID 0x%04X: %d sections, %d bits changed' % (
+            log('Правка битов копирования, PMT PID 0x%04X: %d секций, изменено битов %d' % (
                 self.pmt_pid, self.stats.get(self.pmt_pid, 0), self.copy_bits))
-            log('Copy control (before):')
+            log('Биты копирования (было):')
             describe_copy_control(self.copy_before, '  ', log)
-            log('Copy control (after):')
+            log('Биты копирования (стало):')
             describe_copy_control(self.copy_after, '  ', log)
             self.warn_output_protection(self.copy_after)
-            log('Every other byte of the file was copied unchanged.')
+            log('Остальные байты файла скопированы без изменений.')
             return
         dur = (self.T_last - self.T_start_out) / 90000 if self.T_start_out is not None else 0
         log('')
         if not self.cap_tracks:
-            log('Done: no new captions')
+            log('Готово: без новых субтитров')
         for n, tr in enumerate(self.cap_tracks):
-            log('Done, captions %d (%s, %s): %s, %s%s' % (
+            log('Готово, субтитры %d (%s, %s): %s, %s%s' % (
                 n + 1, os.path.basename(tr.path), tr.lang.decode(),
-                plural(tr.count['show'], 'cue', 'cues', 'cues'),
-                plural(tr.count['clear'], 'clear', 'clears', 'clears'),
-                (', skipped (outside the video): %d' % tr.skipped) if tr.skipped else ''))
-        log('Service %d%s, PMT PID 0x%04X, %s' % (
-            self.out_sid, (' (%d on the input)' % self.sid) if self.out_sid != self.sid else '', self.out_pmt_pid,
-            ('captions: %s; %s; area %dx%d+%d+%d, up to %d glyphs per row; positioning %s' % (
+                plural(tr.count['show'], 'фраза', 'фразы', 'фраз'),
+                plural(tr.count['clear'], 'очистка', 'очистки', 'очисток') + ' экрана',
+                (', пропущено (вне видео): %d' % tr.skipped) if tr.skipped else ''))
+        log('Сервис %d%s, PMT PID 0x%04X, %s' % (
+            self.out_sid, (' (во входе %d)' % self.sid) if self.out_sid != self.sid else '', self.out_pmt_pid,
+            ('субтитры: %s; %s; область %dx%d+%d+%d, до %d знаков в строке; позиционирование %s' % (
                 '; '.join('PID 0x%04X tag 0x%02X: %s' % (pid, tag, ', '.join(
                     '%s%s%s' % (('字幕%d ' % (t.lang_tag + 1)) if len(trs) > 1 else '', t.lang.decode(),
-                                ' (offset %+.2f s)' % t.offset if t.offset else '') for t in trs))
+                                ' (сдвиг %+.2f с)' % t.offset if t.offset else '') for t in trs))
                     for pid, tag, trs in caption_groups(self.cap_tracks)),
-                'ARIB sets (JIS)' if ENCODING == 'jis' else 'UCS/UTF-8 (TCS=1)',
+                'наборы ARIB (JIS)' if ENCODING == 'jis' else 'UCS/UTF-8 (TCS=1)',
                 AREA_W, AREA_H, AREA_X, AREA_Y, MAX_HALF, POSITIONING.upper()))
-            if self.captions else 'no new captions (remux)'))
+            if self.captions else 'без новых субтитров (перемукс)'))
         for tr in self.new_audio:
             i = tr.info
             left = tr.nchunks - tr.next
             n = self.new_audio.index(tr)
             n_keep = len([e for e in self.src_pmt['es'] if is_audio_es(e)]) if self.a.keep_audio else 0
             lang = per_track(self.audio_langs, n + n_keep, b'jpn')
-            fmt = ('DTS %d kbit/s %s%s' % (i['kbps'], i.get('mode', ''), ' + LFE' if i.get('lfe') else '')
-                   if tr.codec == 'dts' else
-                   'Dolby Digital %d kbit/s%s' % (i['kbps'], ' (5.1)' if i.get('lfe') and i['ch'] == 6 else '')
+            fmt = ('Dolby Digital %d кбит/с%s' % (i['kbps'], ' (5.1)' if i.get('lfe') and i['ch'] == 6 else '')
                    if tr.codec == 'ac3' else
-                   'linear PCM 16-bit (SMPTE 302M)' if tr.codec == 'pcm' else
-                   ('MPEG-%d Layer II %d kbit/s' % (1 if i['mpeg1'] else 2, i['kbps'])) if tr.codec == 'mp2' else (
+                   'линейный PCM 16 бит (SMPTE 302M)' if tr.codec == 'pcm' else
+                   ('MPEG-%d Layer II %d кбит/с' % (1 if i['mpeg1'] else 2, i['kbps'])) if tr.codec == 'mp2' else (
                 '%s AAC-LC' % ('MPEG-2' if i['mpeg2'] else 'MPEG-4')))
-            log('Audio %d: %s -> PID 0x%04X, tag 0x%02X, %s%s%s: %s %d Hz %d ch, %s, encoder %s (delay %d samples), '
-                '%.1f s%s' % (n + 1, tr.path, self.pid_map.get(tr.pid, tr.pid), tr.tag, lang.decode(),
-                              (' "%s"' % tr.name) if tr.name else '', (', offset %+.3f s' % tr.offset) if tr.offset else '',
+            log('Звук %d: %s → PID 0x%04X, tag 0x%02X, %s%s%s: %s %d Гц %d кан., %s, кодер %s (задержка %d отсч.), '
+                '%.1f с%s' % (n + 1, tr.path, self.pid_map.get(tr.pid, tr.pid), tr.tag, lang.decode(),
+                              (' «%s»' % tr.name) if tr.name else '', (', сдвиг %+.3f с' % tr.offset) if tr.offset else '',
                               fmt, i['rate'], i['ch'],
-                              'CRC' if i['crc'] else 'no CRC', tr.source, tr.delay, tr.duration,
-                              ('; did not fit the video: %.1f s' % (left * tr.chunk / 48000.0
+                              'CRC' if i['crc'] else 'без CRC', tr.source, tr.delay, tr.duration,
+                              ('; не вошло в видео: %.1f с' % (left * tr.chunk / 48000.0
                                                                if tr.codec == 'pcm' else
                                                                left * tr.chunk / max(1, len(tr.es)) * tr.duration))
                               if left > 2 else ''))
@@ -4732,76 +4171,59 @@ class Muxer:
         after = self.copy_after or copy_control_values(self.pmt_info['descs'])
         self.warn_output_protection(after)
         if copy_control_requested(self.a):
-            log('Copy control (before):')
+            log('Биты копирования (было):')
             describe_copy_control(before, '  ', log)
-            log('Copy control (after):')
+            log('Биты копирования (стало):')
             describe_copy_control(after, '  ', log)
             if self.copy_only:
-                log('  bits changed: %d; the rest of the file was copied byte for byte' % self.copy_bits)
+                log('  изменено битов: %d; остальной файл скопирован байт в байт' % self.copy_bits)
         elif before:
-            log('Copy control (unchanged): 0xC1 = %s, 0xDE = %s%s' % (
-                ('0x%02X -- %s' % (before[0xC1], DRC_NAMES[before[0xC1] >> 6])) if 0xC1 in before else 'absent',
-                ('0x%02X' % before[0xDE]) if 0xDE in before else 'absent',
+            log('Биты копирования (без изменений): 0xC1 = %s, 0xDE = %s%s' % (
+                ('0x%02X — %s' % (before[0xC1], DRC_NAMES[before[0xC1] >> 6])) if 0xC1 in before else 'нет',
+                ('0x%02X' % before[0xDE]) if 0xDE in before else 'нет',
                 '' if 0xC1 not in before else ''))
         if self.pid_map:
-            log('PIDs remapped: ' + ', '.join('0x%04X->0x%04X' % kv for kv in sorted(self.pid_map.items()) if kv[0] != kv[1]))
-        if self.dtheater:
-            log('Mode: %s, constant rate %.3f Mbit/s' % (
-                'as an HM-DH30000 writes it -- PAT, PMT, SIT, DIT' if self.deck
-                else 'D-Theater tape -- PAT and PMT only, no SI', self.dt_rate / 1e6))
-            log('  DTCP: CCI=%s, EPN=%d, ICT=%d, APS=%d' % (
-                DTCP_CCI_NAMES[DTCP_CCI[self.a.dtcp_cci]], 0 if self.a.dtcp_epn_asserted else 1,
-                0 if self.a.dtcp_no_image_constraint else 1, self.a.dtcp_aps))
-            if self.out_pkts:
-                log('  null packets: %d (%.1f %% of the stream)' % (self.nulls, 100.0 * self.nulls / self.out_pkts))
-        log('SI mode: %s' % {'partial': 'partial TS for D-VHS (PAT/PMT/SIT/DIT)',
-                             'broadcast': 'broadcast-like (PAT/PMT/NIT/SDT/EIT/TOT/BIT)',
-                             'both': 'broadcast tables plus SIT', 'keep': 'source stream untouched',
-                             'dtheater': 'D-Theater tape',
-                             'deck': 'a deck recording (PAT/PMT/SIT/DIT, MTRM, DTCP)'}[self.mode])
+            log('PID переназначены: ' + ', '.join('0x%04X→0x%04X' % kv for kv in sorted(self.pid_map.items()) if kv[0] != kv[1]))
+        log('Режим SI: %s' % {'partial': 'partial TS для D-VHS (PAT/PMT/SIT/DIT)',
+                              'broadcast': 'как в эфире (PAT/PMT/NIT/SDT/EIT/TOT/BIT)',
+                              'both': 'эфирные таблицы + SIT', 'keep': 'исходный поток без изменений'}[self.mode])
         if self.gen_full and self.event:
             g = GENRES[self.a.genre] >> 4
             dvb = DVB_GENRE_NAMES.get(g)
             if dvb:
-                log('Genre: %s (ARIB, content_nibble %d). Players and MediaInfo take the names from '
-                    'the DVB table and will call it "%s" -- the value in the file is right, only the tables differ.'
+                log('Жанр: %s (ARIB, content_nibble %d). Плееры и MediaInfo берут названия из таблицы DVB '
+                    'и назовут его «%s» — в файле значение верное, различаются только таблицы.'
                     % (self.a.genre, g, dvb))
         if self.gen_full:
-            log('  NIT %d s, SDT %d s, EIT[p/f] %d s, EIT schedule %d s, TOT %d s, BIT %d s%s' % (
+            log('  NIT %d с, SDT %d с, EIT[p/f] %d с, расписание EIT %d с, TOT %d с, BIT %d с%s' % (
                 SI_PERIODS['nit'], SI_PERIODS['sdt'], SI_PERIODS['eit_pf'], SI_PERIODS['eit_sched'],
                 SI_PERIODS['tot'], SI_PERIODS['bit'],
-                ('; superimpose PID 0x%04X' % self.sup_pid) if self.sup_pid else ''))
+                ('; суперимпоз PID 0x%04X' % self.sup_pid) if self.sup_pid else ''))
         if self.generate_sit:
-            log('SIT: network_id 0x%04X, media_type %s, peak_rate %.2f Mbit/s' % (
+            log('SIT: network_id 0x%04X, media_type %s, peak_rate %.2f Мбит/с' % (
                 self.network_id, self.media_type.decode(), self.peak_rate / 1e6))
         if dur > 0:
             total = self.bytes_out * 8 / dur
-            log('Duration %.1f s, average output bit rate %.2f Mbit/s' % (dur, total / 1e6))
+            log('Длительность %.1f с, средний битрейт выхода %.2f Мбит/с' % (dur, total / 1e6))
             for pid in sorted(self.stats):
-                log('   PID 0x%04X: %8.3f Mbit/s' % (pid, self.stats[pid] * TS * 8 / dur / 1e6))
+                log('   PID 0x%04X: %8.3f Мбит/с' % (pid, self.stats[pid] * TS * 8 / dur / 1e6))
             types = {es['type'] for es in self.pmt_info['es']}
             if not types & {0x02}:
-                log('Note: the video is not MPEG-2 -- D-VHS records MPEG-2 TS only.')
+                log('Внимание: видео не MPEG-2 — D-VHS пишет только MPEG-2 TS.')
             if types & AUDIO_TYPES and not types & {0x0F}:
-                log('Note: the audio is not AAC -- the built-in BS decoder of a Japanese deck will not play it '
-                    '(recording the bitstream still works).')
+                log('Внимание: звук не AAC — встроенный BS-декодер японских дек его не воспроизведёт '
+                    '(запись битстрима при этом возможна).')
             peak, at = self.peak_rate_seen
-            if self.dtheater and peak > self.dt_rate:
-                self.warn('the measured peak of %.1f Mbit/s is above the declared tape rate of %.1f -- '
-                          'raise --dtheater-rate' % (peak / 1e6, self.dt_rate / 1e6))
             if peak:
-                log('Peak instantaneous rate (between adjacent PCRs): %.1f Mbit/s at %.1f s' % (peak / 1e6, at))
+                log('Пиковая мгновенная скорость (между соседними PCR): %.1f Мбит/с на %.1f с' % (peak / 1e6, at))
                 over = [name for name, lim in DVHS_MODES if peak > lim]
                 if over:
-                    self.warn('a peak of %.1f Mbit/s is above the %s limit -- the deck may stall there. '
-                              'Usually it is the video itself: lower its bit rate or maxrate'
+                    self.warn('пик %.1f Мбит/с выше предела %s — дека может запнуться в этом месте. '
+                              'Обычно это всплеск самого видео: снизьте его битрейт или maxrate'
                               % (peak / 1e6, '/'.join(over)))
-            # judge by the worse of the two measurements, so the verdict never
-            # contradicts the peak warning printed just above
-            worst = max(self.peak_rate, peak or 0)
-            fits = [name for name, rate in DVHS_MODES if worst <= rate * 1.01]
-            log('D-VHS: ' + ('fits recording mode ' + '/'.join(fits) if fits else
-                            'peak bit rate above 28.2 Mbit/s -- even HS cannot take it'))
+            fits = [name for name, rate in DVHS_MODES if self.peak_rate <= rate]
+            log('D-VHS: ' + ('помещается в режим ' + '/'.join(fits) if fits else
+                             'пиковый битрейт выше 28.2 Мбит/с — даже HS не потянет'))
 
 
 def plural(n, one, few, many):
@@ -4816,7 +4238,7 @@ def plural(n, one, few, many):
 
 def list_streams(probe):
     if not probe.pat:
-        raise SystemExit('no PAT found')
+        raise SystemExit('PAT не найдена')
     print('transport_stream_id: 0x%04X, network_id: %s' % (
         probe.pat['tsid'], '0x%04X' % probe.nit_id if probe.nit_id is not None else '—'))
     for num, pid in probe.pat['programs']:
@@ -4824,172 +4246,149 @@ def list_streams(probe):
             print('  NIT PID 0x%04X' % pid)
             continue
         info = probe.pmts.get(pid)
-        print('  service %d (PMT 0x%04X)%s' % (num, pid, '' if info else ' -- PMT not found'))
+        print('  service %d (PMT 0x%04X)%s' % (num, pid, '' if info else ' — PMT не найдена'))
         if info:
             print('    PCR PID 0x%04X' % info['pcr_pid'])
             for es in info['es']:
                 tag = component_tag(es)
                 print('    PID 0x%04X  %-16s tag %s%s' % (
                     es['pid'], es_type_name(es['type']), '0x%02X' % tag if tag is not None else '—',
-                    '  [ARIB captions]' if is_caption_es(es) else ''))
+                    '  [субтитры ARIB]' if is_caption_es(es) else ''))
     for num, pid in probe.pat['programs']:
         info = probe.pmts.get(pid)
         if num and info:
             vals = copy_control_values(info['descs'])
             if vals:
-                print('  copy control of service %d:' % num)
+                print('  управление копированием сервиса %d:' % num)
                 describe_copy_control(vals, '    ')
-    print('SIT present: %s, EIT[p/f]: %s, TOT: %s' % (
-        'yes' if probe.has_sit else 'no', ', '.join(map(str, probe.eit)) or 'no',
-        probe.tot[0].strftime('%Y-%m-%d %H:%M:%S JST') if probe.tot else 'no'))
+    print('SIT в потоке: %s, EIT[p/f]: %s, TOT: %s' % (
+        'есть' if probe.has_sit else 'нет', ', '.join(map(str, probe.eit)) or 'нет',
+        probe.tot[0].strftime('%Y-%m-%d %H:%M:%S JST') if probe.tot else 'нет'))
 
 
 def main():
-    ap = argparse.ArgumentParser(description='ARIB STD-B24 captions and partial TS (ARIB STD-B21) for D-VHS')
-    ap.add_argument('input', help='input MPEG-TS (.m2t/.ts)')
-    ap.add_argument('subs', nargs='*', help='subtitles, .srt or .ass/.ssa (UTF-8); several files are allowed -- '
-                                            'by default they become languages of one caption ES')
-    ap.add_argument('-o', '--output', help='output file')
-    ap.add_argument('--list', action='store_true', help='list services and streams, then exit')
-    ap.add_argument('--service-id', type=lambda s: int(s, 0), help='service_id (default: the first one with video)')
-    ap.add_argument('--caption-pid', help='caption PID (default 0x0130, 0x0131...); per track: 0x130,0x131')
+    ap = argparse.ArgumentParser(description='Субтитры ARIB STD-B24 + partial TS (ARIB STD-B21) для D-VHS')
+    ap.add_argument('input', help='входной MPEG-TS (.m2t/.ts)')
+    ap.add_argument('subs', nargs='*', help='субтитры .srt или .ass/.ssa (UTF-8); можно несколько файлов — '
+                                            'каждый станет отдельным ES (字幕1, 字幕2...)')
+    ap.add_argument('-o', '--output', help='выходной файл')
+    ap.add_argument('--list', action='store_true', help='показать сервисы и потоки и выйти')
+    ap.add_argument('--service-id', type=lambda s: int(s, 0), help='service_id (по умолчанию первый с видео)')
+    ap.add_argument('--caption-pid', help='PID субтитров (по умолчанию 0x0130, 0x0131...); по дорожкам: 0x130,0x131')
     ap.add_argument('--existing', choices=['replace', 'keep'], default='replace',
-                    help='if the stream already has captions: replace them (default) or add another ES')
-    ap.add_argument('--offset', default='0', help='caption offset in seconds; per track: 0,-0.5')
-    ap.add_argument('--lead', type=float, default=0.8, help='how far ahead of its PTS a PES is sent (BS uses 0.8 s)')
-    ap.add_argument('--mgmt-interval', type=float, default=0.5, help='caption_management_data period, seconds')
-    ap.add_argument('--sit-interval', type=float, default=1.0, help='SIT period, seconds (ARIB: no more than 3)')
-    ap.add_argument('--network-id', type=lambda s: int(s, 0), help='network_id for the SIT when there is no NIT')
-    ap.add_argument('--media-type', choices=['BS', 'CS', 'TB', 'AB', 'AC'], help='media_type for the SIT')
-    ap.add_argument('--peak-rate', type=float, help='peak_rate for the SIT, Mbit/s (measured by default)')
-    ap.add_argument('--service-name', help='service name for the SIT (service_descriptor)')
-    ap.add_argument('--provider-name', help='provider name for the SIT')
-    ap.add_argument('--event-name', help='event title for the SIT (short_event_descriptor)')
-    ap.add_argument('--event-text', help='event description for the SIT')
-    ap.add_argument('--jst', help='recording start time "YYYY-MM-DD HH:MM:SS" (JST) when the stream has no TOT')
-    ap.add_argument('--dtheater', action='store_true',
-                    help='D-Theater tape layout: PAT and PMT only, no SI, constant rate padded with '
-                         'null packets, registration MTRM, copy control through the '
-                         'DTCP_descriptor')
-    ap.add_argument('--deck-profile', choices=sorted(DECK_PROFILES), default='victor-dh30000',
-                    help='for --si deck: whose layout to reproduce -- victor-dh30000 (PCR in the '
-                         'video, captions kept), victor-dhx1 (PCR on 0x0FFF), hitachi (programme '
-                         '100, PCR on 0x1010, MTRM version 0x07 JPN, ARIB 0xC1)')
-    ap.add_argument('--psi-interval', type=float, default=0.047,
-                    help='PAT/PMT period in --dtheater mode, seconds (a tape repeats them about 21 times a second)')
-    ap.add_argument('--dtheater-rate', type=float, metavar='MBIT/S',
-                    help='stream rate in --dtheater mode (default: the measured peak plus headroom)')
-    ap.add_argument('--dtcp-cci', choices=sorted(DTCP_CCI), default='never',
-                    help='DTCP_CCI on the tape: free, no-more, once, never (default never, as on tapes)')
-    ap.add_argument('--dtcp-epn-asserted', action='store_true', help='assert EPN (the bit goes to 0)')
-    ap.add_argument('--dtcp-no-image-constraint', action='store_true', help='clear Image_Constraint_Token')
-    ap.add_argument('--dtcp-aps', type=lambda v: int(v, 0), default=0, help='APS in the DTCP_descriptor (0..3)')
-    ap.add_argument('--smoothing-buffer', type=lambda v: int(v, 0), default=950272,
-                    help='buffer size in the smoothing_buffer_descriptor, bytes')
-    ap.add_argument('--si', choices=['partial', 'broadcast', 'deck', 'both', 'keep'], default='partial',
-                    help='service information: partial = partial TS for D-VHS (default); broadcast = like on air '
-                         '(NIT/SDT/EIT/TOT/BIT); deck = exactly what an HM-DH30000 writes when it '
-                         're-encodes; both = both sets; keep = leave the source stream alone')
-    ap.add_argument('--si-regenerate', action='store_true', help='rebuild the SI even for a Japanese stream')
-    ap.add_argument('--network-name', help='network name in the NIT (default for BS: "BS Digital")')
-    ap.add_argument('--ts-id', type=lambda s: int(s, 0), help='transport_stream_id on the output')
-    ap.add_argument('--out-service-id', type=lambda s: int(s, 0), help='service_id on the output (171, say)')
-    ap.add_argument('--broadcaster-id', type=lambda s: int(s, 0), default=1, help='broadcaster_id in the BIT')
-    ap.add_argument('--event-id', type=lambda s: int(s, 0), default=1, help='event_id of the programme')
-    ap.add_argument('--event-duration', type=int, help='event duration in the EIT, minutes (default: from the file)')
-    ap.add_argument('--genre', choices=sorted(GENRES), default='anime', help='genre in the EIT (content_descriptor)')
+                    help='если в потоке уже есть субтитры: заменить (по умолчанию) или добавить второй ES')
+    ap.add_argument('--offset', default='0', help='сдвиг субтитров, с; по дорожкам: 0,-0.5')
+    ap.add_argument('--lead', type=float, default=0.8, help='на сколько секунд PES опережает свой PTS (как на BS: 0.8)')
+    ap.add_argument('--mgmt-interval', type=float, default=0.5, help='период caption_management_data, с')
+    ap.add_argument('--sit-interval', type=float, default=1.0, help='период SIT, с (ARIB: не больше 3)')
+    ap.add_argument('--network-id', type=lambda s: int(s, 0), help='network_id для SIT, если нет NIT')
+    ap.add_argument('--media-type', choices=['BS', 'CS', 'TB', 'AB', 'AC'], help='media_type для SIT')
+    ap.add_argument('--peak-rate', type=float, help='peak_rate для SIT, Мбит/с (по умолчанию измеряется)')
+    ap.add_argument('--service-name', help='название канала для SIT (service_descriptor)')
+    ap.add_argument('--provider-name', help='название вещателя для SIT')
+    ap.add_argument('--event-name', help='название передачи для SIT (short_event_descriptor)')
+    ap.add_argument('--event-text', help='описание передачи для SIT')
+    ap.add_argument('--jst', help='время начала записи "ГГГГ-ММ-ДД ЧЧ:ММ:СС" (JST), если в потоке нет TOT')
+    ap.add_argument('--si', choices=['partial', 'broadcast', 'both', 'keep'], default='partial',
+                    help='служебные таблицы: partial — partial TS для D-VHS (по умолчанию); broadcast — как в эфире '
+                         '(NIT/SDT/EIT/TOT/BIT); both — оба набора; keep — не трогать исходный поток')
+    ap.add_argument('--si-regenerate', action='store_true', help='перестроить SI даже у японского потока')
+    ap.add_argument('--network-name', help='название сети в NIT (по умолчанию для BS: "BS Digital")')
+    ap.add_argument('--ts-id', type=lambda s: int(s, 0), help='transport_stream_id на выходе')
+    ap.add_argument('--out-service-id', type=lambda s: int(s, 0), help='service_id на выходе (например 171)')
+    ap.add_argument('--broadcaster-id', type=lambda s: int(s, 0), default=1, help='broadcaster_id в BIT')
+    ap.add_argument('--event-id', type=lambda s: int(s, 0), default=1, help='event_id передачи')
+    ap.add_argument('--event-duration', type=int, help='длительность передачи в EIT, минуты (по умолчанию — по файлу)')
+    ap.add_argument('--genre', choices=sorted(GENRES), default='anime', help='жанр в EIT (content_descriptor)')
     ap.add_argument('--caption-multi', choices=['lang', 'es'], default='lang',
-                    help='several caption tracks: lang = one ES with the languages told apart inside '
-                         '(caption 1 / caption 2, the way broadcast does it); es = one ES per track')
-    ap.add_argument('--caption-lang', default='jpn', help='ISO 639-2 caption languages per track: rus,jpn')
-    ap.add_argument('--audio-lang', default='jpn', help='ISO 639-2 audio languages in PMT order: jpn,rus')
-    ap.add_argument('--no-superimpose', action='store_true', help='do not add the idle superimpose stream')
+                    help='несколько дорожек субтитров: lang — один ES, языки различаются внутри '
+                         '(字幕1/字幕2, так делает вещание); es — отдельный ES на дорожку')
+    ap.add_argument('--caption-lang', default='jpn', help='ISO 639-2 языки субтитров по дорожкам: rus,jpn')
+    ap.add_argument('--audio-lang', default='jpn', help='ISO 639-2 языки звуковых ES по порядку PMT: jpn,rus')
+    ap.add_argument('--no-superimpose', action='store_true', help='не добавлять служебный поток суперимпоза')
     ap.add_argument('--positioning', choices=['aps', 'acps'], default='aps',
-                    help='row positioning: aps = row/column (default; what real decks understand), '
-                         'acps = dots, the way a BS broadcaster does it')
+                    help='позиция строк: aps — строка/столбец (по умолчанию; так понимают реальные деки), '
+                         'acps — точки, как BS-вещатель')
     ap.add_argument('--audio', action=TrackAction, dest='audio_tracks', metavar='FILE',
-                    help='AAC track: WAV/FLAC (encoded) or a ready-made .aac; repeat for several tracks')
+                    help='звуковая дорожка AAC: WAV/FLAC (кодируется) или готовый .aac; повторяйте для нескольких')
     ap.add_argument('--audio-wav', action=TrackAction, dest='audio_tracks', metavar='WAV',
-                    help='track from WAV -> MPEG-2 AAC-LC 48 kHz (may be repeated)')
-    ap.add_argument('--audio-aac', action=TrackAction, dest='audio_tracks', metavar='AAC', help='track from a ready-made ADTS AAC file')
+                    help='дорожка из WAV -> MPEG-2 AAC-LC 48 кГц (можно несколько раз)')
+    ap.add_argument('--audio-aac', action=TrackAction, dest='audio_tracks', metavar='AAC', help='дорожка из готового ADTS AAC')
     ap.add_argument('--audio-mp2', action=TrackAction, dest='audio_tracks', metavar='WAV|MP2',
-                    help='MPEG-1 Layer II track (stream_type 0x03) -- what decks without AAC expect')
+                    help='дорожка MPEG-1 Layer II (stream_type 0x03) — её ждут деки, не понимающие AAC')
     ap.add_argument('--mp2-encoder', choices=['auto', 'libtwolame', 'mp2'], default='auto',
-                    help='MP2 encoder (libtwolame by default when ffmpeg has it)')
-    ap.add_argument('--audio-dts', action=TrackAction, dest='audio_tracks', metavar='WAV|DTS',
-                    help='DTS Coherent Acoustics track (stream_type 0x82) -- found on some D-Theater '
-                         'tapes; 48 kHz, 512-sample frames, up to 1509.75 kbit/s')
+                    help='кодировщик MP2 (по умолчанию libtwolame, если он есть в ffmpeg)')
     ap.add_argument('--audio-ac3', action=TrackAction, dest='audio_tracks', metavar='WAV|AC3',
-                    help='Dolby Digital track (AC-3, stream_type 0x81) -- the audio of D-Theater tapes; '
-                         '48 kHz, up to 640 kbit/s')
+                    help='дорожка Dolby Digital (AC-3, stream_type 0x81) — такой звук на лентах D-Theater; '
+                         '48 кГц, до 640 кбит/с')
     ap.add_argument('--audio-pcm', action=TrackAction, dest='audio_tracks', metavar='WAV',
-                    help='linear PCM track (SMPTE 302M, stream_type 0x83) -- what a deck writes in STD mode '
-                         'and what some D-Theater tapes carry; always 48 kHz, 16-bit, stereo')
-    ap.add_argument('--ffmpeg', default='ffmpeg', help='path to ffmpeg')
+                    help='дорожка линейного PCM (SMPTE 302M, stream_type 0x83) — такой звук дека пишет '
+                         'в режиме STD, встречается и на лентах D-Theater; всегда 48 кГц, 16 бит, стерео')
+    ap.add_argument('--ffmpeg', default='ffmpeg', help='путь к ffmpeg')
     ap.add_argument('--pcm-bit-order', choices=['dvhs', 'ffmpeg'], default='dvhs',
-                    help='bit order in the 20-bit SMPTE 302M field: dvhs = as a deck writes it (default), '
-                         'ffmpeg = as ffmpeg encodes it')
-    ap.add_argument('--keep-audio', action='store_true', help='keep the source audio and append the new tracks after it')
+                    help='порядок бит в 20-битном поле 302M: dvhs — как у деки (по умолчанию), '
+                         'ffmpeg — как кодирует ffmpeg')
+    ap.add_argument('--keep-audio', action='store_true', help='оставить исходный звук и добавить дорожки после него')
     ap.add_argument('--audio-name', action='append', metavar='NAME',
-                    help='name of a new track in the EIT/SIT (in order), for example "English 5.1"')
+                    help='название новой дорожки в EIT/SIT (по порядку), например "日本語" или "Русский"')
     ap.add_argument('--audio-lang-pmt', action='store_true',
-                    help='add an ISO_639_language_descriptor to the PMT (players will show languages; BS has none)')
+                    help='добавить ISO_639_language_descriptor в PMT (плееры покажут языки; у BS его нет)')
     ap.add_argument('--aac-encoder', choices=['auto', 'fdkaac', 'ffmpeg'], default='auto',
-                    help='AAC encoder: fdkaac (ADTS with CRC, like a broadcaster) or the one built into ffmpeg (no CRC)')
-    ap.add_argument('--audio-channels', metavar='N', help='AAC channels: 1, 2 or 6 (5.1); per track: 6,2. '
-                                                         'Default: as in the WAV')
-    ap.add_argument('--audio-bitrate', help='AAC bit rate, kbit/s; per track: 384,192 '
-                                            '(default 256, 384 for 5.1, 144 for mono)')
-    ap.add_argument('--audio-offset', default='0', help='audio offset from the video start, seconds; per track: 0,-0.12')
-    ap.add_argument('--audio-delay-samples', help='encoder delay in samples; comma-separated per track')
+                    help='кодер AAC: fdkaac (ADTS с CRC, как у вещателя) или встроенный в ffmpeg (без CRC)')
+    ap.add_argument('--audio-channels', metavar='N', help='каналы AAC: 1, 2 или 6 (5.1); по дорожкам: 6,2. '
+                                                         'По умолчанию как в WAV')
+    ap.add_argument('--audio-bitrate', help='битрейт AAC, кбит/с; по дорожкам: 384,192 '
+                                            '(по умолчанию 256, для 5.1 — 384, для моно — 144)')
+    ap.add_argument('--audio-offset', default='0', help='сдвиг звука относительно начала видео, с; по дорожкам: 0,-0.12')
+    ap.add_argument('--audio-delay-samples', help='задержка кодера в отсчётах; по дорожкам через запятую')
     ap.add_argument('--arib-pids', action='store_true',
-                    help='broadcast PID numbering: PMT 0x01F0, video 0x0100, audio 0x0110, separate PCR 0x01FF')
-    ap.add_argument('--no-partial-ts', action='store_true', help='same as --si keep')
-    ap.add_argument('--copy', choices=sorted(COPY_ARG), metavar='MODE',
+                    help='эфирная нумерация PID: PMT 0x01F0, видео 0x0100, звук 0x0110, отдельный PCR 0x01FF')
+    ap.add_argument('--no-partial-ts', action='store_true', help='то же, что --si keep')
+    ap.add_argument('--copy', choices=sorted(COPY_ARG), metavar='РЕЖИМ',
                     help='digital_recording_control_data: free | once | never | broadcaster '
-                         '(or the two bits directly: 00 01 10 11)')
+                         '(или биты напрямую: 00 01 10 11)')
     ap.add_argument('--epn', action='store_true',
-                    help='copy free but with protected DTCP output (EPN): sets --copy free, '
-                         'copy_control_type 01 and encryption_mode 0 in descriptor 0xDE')
-    ap.add_argument('--copy-control-type', choices=sorted(CCT_ARG), metavar='MODE',
-                    help='copy_control_type: free = output without encryption, protected = output through DTCP, '
-                         'auto (default) = free for --copy free, protected otherwise')
-    ap.add_argument('--aps', type=lambda v: int(v, 0), metavar='BITS',
-                    help='APS_control_data: analogue output protection (0 = unrestricted)')
+                    help='копирование свободно, но выход под защитой DTCP (EPN): включает --copy free, '
+                         'copy_control_type 01 и encryption_mode 0 в дескрипторе 0xDE')
+    ap.add_argument('--copy-control-type', choices=sorted(CCT_ARG), metavar='РЕЖИМ',
+                    help='copy_control_type: free — выход без шифрования, protected — выход через DTCP, '
+                         'auto (по умолчанию) — free для --copy free, protected для остальных')
+    ap.add_argument('--aps', type=lambda v: int(v, 0), metavar='БИТЫ',
+                    help='APS_control_data: защита аналогового выхода (0 — без ограничений)')
     ap.add_argument('--user-defined', type=lambda v: int(v, 0),
-                    help='the whole low nibble of 0xC1 at once (overrides --copy-control-type and --aps)')
-    ap.add_argument('--content-availability', type=lambda v: int(v, 0), metavar='BYTE',
-                    help='the payload byte of descriptor 0xDE (0xEF in the reference capture)')
-    ap.add_argument('--diff', metavar='FILE', help='compare input with this file byte by byte and exit')
-    ap.add_argument('--keep-ca', action='store_true', help='do not strip the CA_descriptor from the PMT')
-    ap.add_argument('--drop-data', action='store_true', help='drop data streams (DSM-CC) to fit STD')
-    ap.add_argument('--simple-pes', action='store_true', help='a minimal PES header instead of the broadcast one')
+                    help='весь младший полубайт 0xC1 сразу (перекрывает --copy-control-type и --aps)')
+    ap.add_argument('--content-availability', type=lambda v: int(v, 0), metavar='БАЙТ',
+                    help='байт дескриптора 0xDE целиком (в образце 0xEF)')
+    ap.add_argument('--diff', metavar='ФАЙЛ', help='сравнить input с этим файлом побайтно и выйти')
+    ap.add_argument('--keep-ca', action='store_true', help='не удалять CA_descriptor из PMT')
+    ap.add_argument('--drop-data', action='store_true', help='выбросить потоки данных (DSM-CC), чтобы влезть в STD')
+    ap.add_argument('--simple-pes', action='store_true', help='минимальный PES-заголовок вместо «вещательного»')
     ap.add_argument('--ass-signs', choices=['place', 'top', 'skip'], default='place',
-                    help='ASS: positioned signs (\\pos/\\move) stay in place (place), go to the top (top) '
-                         'or are dropped (skip)')
+                    help='ASS: позиционированные надписи (\\pos/\\move) — на своём месте (place), '
+                         'вверху экрана (top) или не показывать (skip)')
     ap.add_argument('--ass-dialogue-only', action='store_true',
-                    help='ASS: dialogue only -- styles of signs, songs/OP/ED/karaoke, notes and titles '
-                         '(by name and by content) and events with \\pos/\\move/\\k/\\clip/rotation/drawings are dropped')
+                    help='ASS: только реплики — стили надписей, песен/OP/ED/караоке, примечаний и титров '
+                         '(по имени и по содержимому) и события с \\pos/\\move/\\k/\\clip/поворотом/рисунком отбрасываются')
     ap.add_argument('--ass-list-styles', action='store_true',
-                    help='ASS: print the verdict for every style and exit')
-    ap.add_argument('--ass-skip-styles', metavar='A,B', help='ASS: do not show these styles')
-    ap.add_argument('--ass-only-styles', metavar='A,B', help='ASS: show only these styles')
+                    help='ASS: показать, какие стили считаются репликами, и выйти')
+    ap.add_argument('--ass-skip-styles', metavar='A,B', help='ASS: не показывать эти стили')
+    ap.add_argument('--ass-only-styles', metavar='A,B', help='ASS: показывать только эти стили')
     ap.add_argument('--ass-small', choices=['ssz', 'normal'], default='ssz',
-                    help='ASS: small text in the small ARIB SSZ size (default) or in the normal one. '
-                         'Note: libaribcaption/ffmpeg treat SSZ as ruby text and do not print it')
+                    help='ASS: мелкий текст — малым размером ARIB SSZ (по умолчанию) или обычным. '
+                         'Внимание: libaribcaption/ffmpeg в текстовом режиме считают SSZ фуриганой и не выводят')
     ap.add_argument('--ass-min-duration', type=float, default=0.3,
-                    help='ASS: screens shorter than this (seconds) are merged into the previous one')
+                    help='ASS: экраны короче этого (с) поглощаются предыдущим')
     ap.add_argument('--encoding', choices=['jis', 'utf8'], default='jis',
-                    help='caption text encoding: jis = ARIB sets (as in Japanese broadcast); '
-                         'utf8 = UCS/TCS=1, needed for --caption-lang eng, lifts the character-set limits')
-    ap.add_argument('--area', metavar='WxH+X+Y',
-                    help='caption area inside the 960x540 plane (default 620x480+170+30, as on BS). '
-                         'A wider area means more glyphs per row: 880x480+40+30 gives 44 instead of 31')
+                    help='кодирование текста субтитров: jis — наборы ARIB (как в японском вещании); '
+                         'utf8 — UCS/TCS=1, нужно для --caption-lang eng, снимает ограничения набора знаков')
+    ap.add_argument('--area', metavar='ШxВ+X+Y',
+                    help='область субтитров в плоскости 960x540 (по умолчанию 620x480+170+30, как на BS). '
+                         'Шире область — больше знаков в строке: 880x480+40+30 даёт 44 вместо 31')
     ap.add_argument('--cyrillic', choices=['full', 'half'], default='full',
-                    help='Cyrillic/Greek: full = a full cell (15 letters per row), '
-                         'half = half width through MSZ (30 letters, the receiver squeezes the glyphs)')
+                    help='кириллица/греческий: full — в полной клетке (15 букв в строке), '
+                         'half — вполширины через MSZ (30 букв, приёмник сжимает глифы)')
     ap.add_argument('--drcs-font', metavar='TTF|auto',
-                    help='draw glyphs outside the ARIB sets as DRCS with this font; needs Pillow')
+                    help='рисовать знаки вне наборов ARIB (і ї є ґ ў « » …) как DRCS этим шрифтом; нужен Pillow')
     a = ap.parse_args()
 
     apply_epn(a)
@@ -4999,7 +4398,7 @@ def main():
     if a.ass_list_styles:
         names = [f for f in a.subs if f.lower().endswith(('.ass', '.ssa'))]
         if not names:
-            ap.error('--ass-list-styles needs an .ass/.ssa file')
+            ap.error('--ass-list-styles нужен файл .ass/.ssa')
         for f in names:
             parse_ass(f, AribCharset(), a)
         return
@@ -5008,12 +4407,12 @@ def main():
         list_streams(probe)
         return
     if not a.output:
-        ap.error('-o/--output is required (or --list); without subs it is a plain remux')
+        ap.error('нужен -o/--output (или --list); без subs — только перемукс')
     if not copy_control_requested(a) and not a.subs and not a.audio_tracks \
             and (a.si == 'keep' or a.no_partial_ts):
-        ap.error('nothing to do: no subtitles, no audio, no SI or copy-control changes')
+        ap.error('нечего делать: нет ни субтитров, ни звука, ни изменений SI или битов копирования')
     if a.sit_interval > 3:
-        ap.error('--sit-interval cannot exceed 3 s')
+        ap.error('--sit-interval не может быть больше 3 с')
     cs = AribCharset(half_letters=a.cyrillic == 'half', drcs=DrcsFont(a.drcs_font) if a.drcs_font else None)
     global POSITIONING, ENCODING
     POSITIONING = a.positioning
@@ -5027,7 +4426,7 @@ def main():
         else:
             lst = parse_srt(path, cs)
         if not lst:
-            raise SystemExit('no subtitles found in %s' % path)
+            raise SystemExit('в %s не найдено ни одного субтитра' % path)
         subs.append((path, lst))
     mux = Muxer(a, probe, subs, cs)
     if mux.copy_only:

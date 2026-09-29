@@ -1,145 +1,135 @@
-# arib_caption_mux.py — manual
+<p align="center"><img width="400" height="92" alt="LLMdevelopment" src="https://github.com/user-attachments/assets/9a3c3610-271d-4f9b-959b-bed32bcb9461" /></p>
+
+# arib_caption_mux.py - руководство
+
+Скрипт собирает MPEG-2 Transport Stream, который японская дека D-VHS
+принимает как запись с цифрового вещания: с субтитрами ARIB STD-B24,
+звуком AAC, служебными таблицами и флагами копирования.
+
 <p align="center"><img alt="Да, Господин Кальмар!" src="https://github.com/andruxaster/ARIB-captions-muxer/blob/main/6fba3bbd4188c2c2.png?raw=true" /></p>
 
-The script builds an MPEG-2 Transport Stream that a Japanese D-VHS deck
-accepts as a digital broadcast recording: ARIB STD-B24 captions, AAC audio,
-service information tables and copy-control flags.
+Проверялось на Victor HM-DH30000 и на эфирном образце с BS日テレ.
 
-Tested on Victor decks -- HM-DH30000, HM-DHX1 and HM-DHS1 -- and against an
-off-air capture from BS Nittele. Victor is the Japanese domestic brand; the
-same machines were sold as JVC everywhere else, and the Japanese ones matter
-here because they carry the ARIB caption decoder.
-
-Two facts about that hardware shape the advice below:
-
-* **Captions are displayed only by the HM-DH30000.** The other decks record
-  and replay the caption ES faithfully, they simply do not render it.
-* **The HM-DH30000 records only in HS.** Ask it for STD or LS3 and it
-  re-encodes the stream itself; the captions survive that, verified by
-  experiment. So when that deck is the target there is no point squeezing the
-  stream into the 14.1 Mbit/s of STD -- feed it HS and let it transcode.
-
-- [1. How it works](#1-how-it-works)
-- [2. Installation](#2-installation)
-- [3. First run](#3-first-run)
-- [4. Subtitles](#4-subtitles)
-- [5. Latin, Cyrillic and the caption area](#5-latin-cyrillic-and-the-caption-area)
-- [6. ASS files](#6-ass-files)
-- [7. Audio](#7-audio)
-- [8. Service information](#8-service-information)
-- [8.8. D-Theater tape mode](#88-d-theater-tape-mode)
-- [9. Copy-control flags](#9-copy-control-flags)
-- [10. Timing](#10-timing)
-- [11. Bit rate and D-VHS modes](#11-bit-rate-and-d-vhs-modes)
-- [12. Ready-made recipes](#12-ready-made-recipes)
-- [13. Checking the result](#13-checking-the-result)
-- [14. Troubleshooting](#14-troubleshooting)
-- [15. Every option](#15-every-option)
-- [Glossary](#glossary)
+- [1. Что происходит внутри](#1-что-происходит-внутри)
+- [2. Установка](#2-установка)
+- [3. Первый запуск](#3-первый-запуск)
+- [4. Субтитры](#4-субтитры)
+- [5. Латиница, кириллица и область субтитров](#5-латиница-кириллица-и-область-субтитров)
+- [6. Файлы ASS](#6-файлы-ass)
+- [7. Звук](#7-звук)
+- [8. Служебные таблицы](#8-служебные-таблицы)
+- [9. Флаги копирования](#9-флаги-копирования)
+- [10. Тайминг](#10-тайминг)
+- [11. Битрейт и режимы D-VHS](#11-битрейт-и-режимы-d-vhs)
+- [12. Готовые рецепты](#12-готовые-рецепты)
+- [13. Проверка результата](#13-проверка-результата)
+- [14. Если что-то не работает](#14-если-что-то-не-работает)
+- [15. Все ключи](#15-все-ключи)
 
 ---
 
-## 1. How it works
+## 1. Что происходит внутри
 
-### 1.1. Why this is needed at all
+### 1.1. Зачем это вообще нужно
 
-A D-VHS deck does not encode video. It writes to tape the finished transport
-stream that a tuner hands it over i.LINK. So to get your own material onto
-tape you have to build a stream indistinguishable from a broadcast one — both
-in the caption format and in the service information.
+Дека D-VHS не кодирует видео. Она пишет на ленту готовый транспортный
+поток, который тюнер отдаёт ей по i.LINK. Значит, чтобы записать на ленту
+свой материал, надо собрать поток, неотличимый от эфирного, - и по формату
+субтитров, и по служебным таблицам.
 
-The script does exactly the inverse of what
-[libaribcaption](https://github.com/xqq/libaribcaption) does: that library
-decodes ARIB captions, this one composes them.
+Скрипт делает ровно обратное тому, что делает библиотека
+[libaribcaption](https://github.com/xqq/libaribcaption): она разбирает
+субтитры ARIB, он их собирает.
 
-### 1.2. How ARIB captions are built
+### 1.2. Как устроены субтитры ARIB
 
-Unlike SRT, which carries only text and timing, ARIB STD-B24 is a **stream of
-drawing commands**. Every cue travels as a sequence of bytes the receiver
-executes: set the plane size, set the area, place the cursor, pick a colour,
-emit glyphs.
+В отличие от SRT, где есть только текст и время, ARIB STD-B24 - это
+**поток команд рисования**. Каждая фраза передаётся как набор байтов,
+которые приёмник выполняет: задать размер плоскости, задать область,
+поставить курсор, выбрать цвет, вывести знаки.
 
-Text is encoded with an 8-unit code that switches between sets:
+Текст кодируется восьмибитным кодом с переключением наборов:
 
-| Set | Contents | Invoked by |
+| Набор | Что в нём | Как вызывается |
 |---|---|---|
-| Kanji (G0) | JIS X 0208: ideographs, kana, Cyrillic, Greek | `LS0` |
-| Alphanumeric (G1) | half-width Latin letters and digits | `LS1` |
-| DRCS | bitmaps for glyphs missing from the sets | `ESC 2/10` |
+| Кандзи (G0) | JIS X 0208: иероглифы, кана, кириллица, греческий | `LS0` |
+| Алфавитно-цифровой (G1) | латиница и цифры вполширины | `LS1` |
+| DRCS | картинки знаков, которых в наборах нет | `ESC 2/10` |
 
-Cyrillic sits in row 7 of JIS X 0208, so Russian text encodes natively with
-no tricks. Guillemets and the Ukrainian letters are not there — see
-section 5.
+Кириллица лежит в JIS X 0208 в 7-м ряду, поэтому русский текст
+кодируется штатно, без ухищрений. А вот «ёлочек» и украинских букв там
+нет - о них раздел 5.
 
-### 1.3. Screen geometry
+### 1.3. Геометрия экрана
 
-The script reproduces the layout Japanese broadcasters use:
-
-```
-plane 960 x 540                      (SWF 7)
-    caption area 620 x 480 at (170, 30)          (SDF/SDP)
-        glyph 36 x 36, spacing 4, line spacing 24    (SSM/SHS/SVS)
-            -> cell of 40 x 60 dots
-            -> 15 full-width glyphs per row, up to 8 rows
-```
-
-A full-width glyph (an ideograph, or Cyrillic in normal mode) takes a whole
-cell; a half-width glyph (Latin, digits, or Cyrillic in `half` mode) takes
-half of one. Hence the limit of 15 or 30 glyphs per row.
-
-### 1.4. Positioning: APS versus ACPS
-
-This is where the script deliberately departs from a real broadcaster.
-
-- **ACPS** gives the position in dots. That is what a BS broadcaster sends.
-- **APS** gives a row and a column in cells.
-
-The trouble is that receivers disagree about the origin of ACPS coordinates.
-libaribcaption counts from the corner of the screen, while a Victor HM-DH30000
-counts from the corner of the caption area, that is with an offset of
-(170, 30). Sent through ACPS, rows drifted right and down, hit the edge and
-wrapped around into the top-left corner.
-
-So **APS is the default**: nothing is ambiguous about it. `--positioning acps`
-restores the old behaviour if you want byte-level similarity with broadcast.
-
-### 1.5. How the stream reaches the tape
-
-A tuner hands the deck not the full broadcast multiplex but a **partial TS**
-per ARIB STD-B21: one programme, without the other channels and without most
-of the service information. In their place comes the SIT, which describes
-what exactly was recorded. That is the default mode (`--si partial`).
+Скрипт повторяет раскладку японских вещателей:
 
 ```
-input: full broadcast TS            output: partial TS
-+----------------------+           +----------------------+
-| PAT (many programmes)|           | PAT (one programme)  |
-| PMT of service 171   |           | PMT plus caption ES  |
-| PMT of services 172-3|  ------>  | video, audio, PCR    |
-| NIT SDT EIT TOT BIT  |           | SIT (once a second)  |
-| ECM, SDTT, null      |           | DIT (at splices)     |
-| video, audio, data   |           +----------------------+
-+----------------------+
+плоскость 960 × 540          (SWF 7)
+    область субтитров 620 × 480, начиная с точки (170, 30)     (SDF/SDP)
+        знак 36 × 36, межзнаковый 4, межстрочный 24            (SSM/SHS/SVS)
+            → клетка 40 × 60 точек
+            → 15 полноширинных знаков в строке, до 8 строк
+```
+
+Полноширинный знак (иероглиф, кириллица в обычном режиме) занимает клетку
+целиком, знак вполширины (латиница, цифры, кириллица в режиме `half`) -
+половину. Отсюда предел в 15 или 30 знаков на строку.
+
+### 1.4. Позиционирование: APS против ACPS
+
+Это место, где скрипт расходится с настоящим вещателем, и намеренно.
+
+- **ACPS** задаёт позицию в точках. Так делает BS-вещатель.
+- **APS** задаёт строку и столбец в клетках.
+
+Проблема в том, что от чего отсчитываются координаты ACPS, приёмники
+понимают по-разному. libaribcaption считает от угла экрана, а Victor HM-DH30000 -
+от угла области субтитров, то есть со смещением (170, 30). При выводе через
+ACPS строки уезжали вправо-вниз, упирались в край и переносились по кругу
+в левый верхний угол.
+
+Поэтому **по умолчанию используется APS**: в нём разночтений нет.
+`--positioning acps` возвращает прежнее поведение, если понадобится
+побайтовое сходство с эфиром.
+
+### 1.5. Как поток попадает на ленту
+
+Тюнер отдаёт деке не полный эфирный мультиплекс, а **partial TS** по
+ARIB STD-B21: одна программа, без чужих каналов и без большей части
+служебных таблиц. Вместо них - таблица SIT, которая описывает, что
+именно записано. Это и есть режим по умолчанию (`--si partial`).
+
+```
+вход: полный эфирный TS            выход: partial TS
+┌──────────────────────┐           ┌──────────────────────┐
+│ PAT (много программ) │           │ PAT (одна программа) │
+│ PMT сервиса 171      │           │ PMT + ES субтитров   │
+│ PMT сервисов 172,173 │  ──────►  │ видео, звук, PCR     │
+│ NIT SDT EIT TOT BIT  │           │ SIT (раз в секунду)  │
+│ ECM, SDTT, null      │           │ DIT (на склейках)    │
+│ видео, звук, данные  │           └──────────────────────┘
+└──────────────────────┘
 ```
 
 ---
 
-## 2. Installation
+## 2. Установка
 
-You need **Python 3.8+**. Everything else is optional:
+Нужен **Python 3.8+**. Всё остальное по желанию:
 
-| Program | What for | Without it |
+| Программа | Для чего | Без неё |
 |---|---|---|
-| `ffmpeg` | audio encoding, reading non-WAV input | audio can be supplied as a ready `.aac`/`.mp2` |
-| `fdkaac` | AAC with CRC in the ADTS, as on air | ffmpeg makes AAC without CRC |
-| Pillow | `--drcs-font` | glyphs outside the sets become the geta mark |
+| `ffmpeg` | кодирование звука, чтение не-WAV | звук можно подать готовым `.aac`/`.mp2` |
+| `fdkaac` | AAC с CRC в ADTS, как в эфире | ffmpeg сделает AAC без CRC |
+| Pillow | `--drcs-font` | знаки вне наборов заменяются на 〓 |
 
 ```bash
 # Debian/Ubuntu
 sudo apt install python3 ffmpeg fdkaac python3-pil
 ```
 
-To check that `ffmpeg` was built with libtwolame (the better MP2 encoder):
+Проверка, что `ffmpeg` собран с libtwolame (лучший кодировщик MP2):
 
 ```bash
 ffmpeg -hide_banner -encoders | grep twolame
@@ -147,9 +137,9 @@ ffmpeg -hide_banner -encoders | grep twolame
 
 ---
 
-## 3. First run
+## 3. Первый запуск
 
-### 3.1. See what is inside a file
+### 3.1. Посмотреть, что внутри файла
 
 ```bash
 python3 arib_caption_mux.py sample.m2t --list
@@ -162,398 +152,397 @@ transport_stream_id: 0x4012, network_id: 0x0004
     PCR PID 0x01FF
     PID 0x0100  MPEG-2 video     tag 0x00
     PID 0x0110  AAC              tag 0x10
-    PID 0x0130  PES private      tag 0x30  [ARIB captions]
-  copy control of service 171:
+    PID 0x0130  PES private      tag 0x30  [субтитры ARIB]
+    PID 0x0138  PES private      tag 0x38
+  управление копированием сервиса 171:
     digital_copy_control (0xC1) = 0x84 (10000100)
-        digital_recording_control_data = 10  copy one generation
+        digital_recording_control_data = 10  одна копия (一世代のみ)
 ```
 
-This is always worth starting with: it shows the services, the PIDs, whether
-captions are already present and what the copy-control flags say.
+С этого стоит начинать всегда: видно сервисы, PID, есть ли уже субтитры
+и какие стоят флаги копирования.
 
-### 3.2. The simplest build
+### 3.2. Простейшая сборка
 
 ```bash
 python3 arib_caption_mux.py input.m2t subs.srt -o output.m2t
 ```
 
-The script takes the first service that has video, inserts the captions as a
-separate ES and rebuilds the stream as a partial TS.
+Скрипт возьмёт первый сервис с видео, вставит субтитры отдельным ES и
+пересоберёт поток в partial TS.
 
 ---
 
-## 4. Subtitles
+## 4. Субтитры
 
-### 4.1. The SRT format
+### 4.1. Формат SRT
 
-Plain SRT in UTF-8. Supported:
+Обычный SRT в UTF-8. Поддерживаются:
 
 ```srt
 1
 00:00:01,000 --> 00:00:04,500
-An ordinary cue,
-two rows
+Обычная реплика,
+две строки
 
 2
 00:00:05,000 --> 00:00:08,000
-<font color="yellow">A coloured cue</font>
+<font color="yellow">Цветная реплика</font>
 
 3
 00:00:09,000 --> 00:00:12,000
-{\an8}A cue at the top of the screen
+{\an8}Реплика вверху экрана
 ```
 
-Colour is mapped onto the eight ARIB colours: black, red, green, yellow,
-blue, magenta, cyan, white. Both names (`yellow`) and hex codes (`#ff4040`)
-are accepted.
+Цвет приводится к восьми цветам ARIB: чёрный, красный, зелёный, жёлтый,
+синий, пурпурный, голубой, белый. Принимаются и названия (`yellow`),
+и шестнадцатеричные коды (`#ff4040`).
 
-### 4.2. Several tracks
+### 4.2. Несколько дорожек
 
-You may pass several subtitle files. By default they are laid out the way
-broadcast does it: **one ES with the languages told apart inside it** by the
-`data_group_id` field — caption 1, caption 2. That is what the caption button
-on the receiver switches between.
+Файлов субтитров можно указать несколько. По умолчанию они укладываются
+так же, как это делает вещание: **один ES, а языки различаются внутри
+него** полем `data_group_id` - 字幕1, 字幕2. Именно между ними приёмник
+переключается кнопкой выбора субтитров.
 
-One ES carries at most two languages. If you pass more tracks, the extra ones
-are dropped with a warning.
+Языков в одном ES бывает не больше двух. Если дорожек больше, лишние
+отбрасываются с предупреждением.
 
-`--caption-multi es` puts every track into its own ES with its own
-component_tag (0x30, 0x31...). The standard permits that too, but **real
-decks do not show it**: verified on a Victor HM-DH30000, only the first track
-appears. The mode is kept for software players.
+`--caption-multi es` кладёт каждую дорожку в отдельный ES с собственным
+component_tag (0x30, 0x31…). Так тоже допустимо по стандарту, но
+**реальные деки этого не показывают**: проверено на Victor HM-DH30000 -
+видна только первая дорожка. Режим оставлен для программных плееров.
 
 ```bash
 python3 arib_caption_mux.py in.m2t ru.ass jp.srt -o out.m2t \
     --caption-lang rus,jpn --offset 0,-0.5
 ```
 
-Per-track parameters are comma-separated lists; if you give fewer values than
-tracks, the last one repeats.
+Параметры по дорожкам задаются списками через запятую; если значений
+меньше, чем дорожек, последнее повторяется.
 
-| Option | Meaning |
+| Ключ | Смысл |
 |---|---|
-| `--caption-lang rus,jpn` | ISO 639-2 languages |
-| `--caption-multi lang` \| `es` | one ES with languages (default) or separate ES |
-| `--offset 0,-0.5` | time offset, seconds |
-| `--caption-pid 0x130,0x131` | PIDs by hand |
+| `--caption-lang rus,jpn` | языки ISO 639-2 |
+| `--caption-multi lang` \| `es` | один ES с языками (по умолчанию) или отдельные ES |
+| `--offset 0,-0.5` | сдвиг во времени, секунды |
+| `--caption-pid 0x130,0x131` | PID вручную |
 
-### 4.3. When the stream already carries captions
+### 4.3. Если субтитры в потоке уже есть
 
-By default (`--existing replace`) the new tracks take over the broadcast ones
-in order, inheriting their PIDs and tags. The language in the SIT and EIT
-descriptors is rewritten to the new track's language.
+По умолчанию (`--existing replace`) новые дорожки замещают эфирные по
+порядку, забирая их PID и теги. При этом язык в дескрипторах SIT и EIT
+переписывается на язык новой дорожки.
 
-`--existing keep` leaves the broadcast captions alone and adds the new ones
-as further ES.
+`--existing keep` оставляет эфирные субтитры и добавляет новые
+следующими ES.
 
-### 4.4. The language code is not just a label
+### 4.4. Код языка - не просто метка
 
-You would think `--caption-lang` only labels the track. In fact, per ARIB,
-the language code tells the receiver **which text encoding to expect**:
+Казалось бы, `--caption-lang` только помечает дорожку. На деле по ARIB
+код языка задаёт приёмнику **схему кодирования текста**:
 
-| Code | What the receiver switches to |
+| Код | Что включает приёмник |
 |---|---|
-| `jpn` and most others | the JIS sets — what the script encodes |
-| `eng`, `tgl` | UTF-8 parsing |
-| `por`, `spa` | the ABNT Latin sets |
+| `jpn` и большинство прочих | наборы JIS - то, что кодирует скрипт |
+| `eng`, `tgl` | разбор UTF-8 |
+| `por`, `spa` | латинские наборы ABNT |
 
-By default the script encodes in JIS, so with `eng` the receiver reads the
-bytes as UTF-8 and shows garbage. There are two ways out.
+По умолчанию скрипт кодирует в JIS, поэтому с `eng` приёмник прочитает
+байты как UTF-8 и покажет мусор. Есть два выхода.
 
-**The safe one: `--caption-lang jpn`.** Latin text comes out of the JIS sets
-perfectly well, and the language code does not affect the picture — it only
-labels the track in the receiver's menu. This works on any Japanese receiver
-because it is exactly what broadcast does.
+**Путь первый, надёжный: `--caption-lang jpn`.** Латиница прекрасно
+выводится из наборов JIS, а код языка на картинку не влияет - он только
+подписывает дорожку в меню приёмника. Работает на любом японском
+приёмнике, потому что это ровно то, что делает вещание.
 
-**The honest one: `--encoding utf8`.** The management packet then carries
-TCS = 1 (UCS mode), the text is encoded as UTF-8, and the C1 codes travel as
-`0xC2` plus the code, as the standard requires.
+**Путь второй, честный: `--encoding utf8`.** Тогда в управляющем пакете
+выставляется TCS = 1 (режим UCS), текст кодируется в UTF-8, а коды C1
+передаются как `0xC2` + код, по требованию стандарта.
 
-The TCS field outranks the language code: the receiver looks at it first and
-only guesses from the language when it is 0. So in `utf8` mode any language
-code works — `eng`, `rus`, `jpn` and anything else. Verified on
-libaribcaption: with TCS = 1 all four give the same correct text.
+Поле TCS приоритетнее кода языка: приёмник сначала смотрит его, и только
+если там 0, гадает о схеме по языку. Поэтому в режиме `utf8` код языка
+свободный - работают и `eng`, и `rus`, и `jpn`, и любой другой. Проверено
+на libaribcaption: с TCS = 1 все четыре дают одинаково верный текст.
 
-Example:
+Пример:
 
 ```bash
 python3 arib_caption_mux.py in.m2t subs.srt -o out.m2t \
     --encoding utf8 --caption-lang eng
 ```
 
-A side benefit: UCS has no character-set limits. Guillemets, low quotes, the
-Ukrainian letters, Japanese and Latin in one row — everything comes out
-directly, and DRCS is not needed.
+Побочная выгода: в UCS нет ограничений набора знаков. «Ёлочки», „лапки“,
+украинские ґ і ї є, белорусская ў, японский и латиница в одной строке -
+всё выводится напрямую, DRCS не нужен.
 
 | | `--encoding jis` | `--encoding utf8` |
 |---|---|---|
-| Encoding | ARIB sets (JIS X 0208) | UTF-8, TCS = 1 |
-| Glyphs outside JIS | substitutions or DRCS | direct |
-| `--caption-lang eng` | garbage | works |
-| Other language codes | `jpn` and most are fine | any |
-| Support by Japanese decks | as in broadcast | **not verified** |
+| Кодирование | наборы ARIB (JIS X 0208) | UTF-8, TCS = 1 |
+| Знаки вне JIS | замены или DRCS | напрямую |
+| `--caption-lang eng` | мусор | работает |
+| Прочие коды языка | `jpn` и большинство - нормально | любой |
+| Поддержка японскими деками | как в вещании | **не проверена** |
 
-That last row matters. UCS mode is in the standard, but Japanese broadcast
-never uses it, so a deck may well not understand it. Only tested on
-libaribcaption. If the deck shows a blank screen, go back to
-`--encoding jis --caption-lang jpn`.
+Последняя строка важна. Режим UCS в стандарте есть, но японское вещание
+им не пользуется, поэтому дека вполне может его не понять. Проверено
+только на libaribcaption. Если дека покажет пустой экран - возвращайтесь
+к `--encoding jis --caption-lang jpn`.
 
-### 4.5. Line wrapping
+### 4.5. Перенос строк
 
-Japanese text wraps by glyph with the kinsoku rules: characters like the
-ideographic comma and full stop never start a row, and an opening bracket
-never ends one. Alphabetic text (Russian, Latin) wraps **only at spaces**;
-words are never split. Rows are balanced in length so you do not end up with
-a long row followed by two words.
-
----
-
-## 5. Latin, Cyrillic and the caption area
-
-### 5.1. Latin
-
-Latin letters, digits and punctuation are **always output at half width**
-(the MSZ size); no option is needed for that. Thirty-one of them fit on a row.
-
-They look widely spaced, and that is not a bug: the receiver's font is
-monospaced, every letter occupies a full half cell, so narrow letters such as
-"i" and "l" leave big gaps. Latin looks the same in real Japanese broadcast.
-
-If the rows are too short, widen the caption area (see 5.4).
-
-In `--encoding utf8` mode the widths are the same: ASCII and Cyrillic go at
-half width, East Asian wide characters take a full cell.
-
-### 5.2. Two width modes for Cyrillic
-
-```bash
---cyrillic full    # default: 15 letters per row
---cyrillic half    # 30 letters per row
-```
-
-In `full` mode Cyrillic takes a whole cell, like an ideograph. It looks like
-broadcast, but the rows are short: an average 32-character cue needs three
-rows.
-
-In `half` mode the letters go at half width and the receiver squeezes the
-glyphs. Thirty characters fit on a row, which is usually more convenient for
-Russian anime subtitles. The downside is that squeezed letters read worse in
-the deck's font.
-
-### 5.3. Glyphs missing from JIS X 0208
-
-Cyrillic is there, but guillemets, low quotes, the Ukrainian letters and the
-Belarusian short u are not. Two ways round it:
-
-**Substitutions** (the default, nothing to do):
-
-| From | To |
-|---|---|
-| « » | double angle brackets |
-| low quotes | curly quotes |
-| single guillemets | angle brackets |
-| Ukrainian i | Latin i |
-| the remaining Ukrainian and Belarusian letters | the geta mark, with a warning |
-
-**DRCS** — the glyph is drawn as a bitmap inside the stream, by exactly the
-mechanism a broadcaster uses for its own special symbols:
-
-```bash
---drcs-font auto                        # find a system font with Cyrillic
---drcs-font /path/to/PTSans-Bold.ttf    # or name your own
-```
-
-Needs Pillow. Glyphs are drawn 36x36 in four brightness levels, which gives
-real guillemets and Ukrainian letters. The limit is 94 distinct glyphs per
-cue.
-
-### 5.4. The caption area
-
-By default the area copies the broadcast one: 620x480 from (170, 30), that is
-31 half cells — 15 ideographs or 31 Latin letters per row. For English and
-Russian subtitles that is cramped.
-
-```bash
---area 880x480+40+30     # 44 characters per row instead of 31
-```
-
-The format is `WxH+X+Y` inside the 960x540 plane. Width is rounded to 20
-dots, height to 60. The script prints the resulting limit:
-
-```
-captions: PID 0x0130 tag 0x30 eng; area 880x480+40+30, up to 44 glyphs per row
-```
-
-The difference on a 62-character cue:
-
-| Area | Layout |
-|---|---|
-| 620x480+170+30 | 3 rows: 21 + 20 + 21 |
-| 880x480+40+30 | 2 rows: 26 + 36 |
-
-Bear in mind that the wider the area, the closer the text sits to the edge of
-the frame, and decks and televisions crop part of it. 880 dots out of 960 is
-about 92 % of the width, still safe; beyond that, check on your own screen.
+Японский текст переносится по знакам с учётом правил: `、。」` и прочие
+не начинают строку, открывающие скобки не остаются в конце. Алфавитный
+текст (русский, латиница) переносится **только по пробелам**, слова не
+рвутся. Строки выравниваются по длине, чтобы не получалось «длинная
+строка - два слова».
 
 ---
 
-## 6. ASS files
+## 5. Латиница, кириллица и область субтитров
 
-### 6.1. What is carried over and what is not
+### 5.1. Латиница
 
-ASS is far richer than ARIB. What ARIB has is carried over:
+Латиница, цифры и знаки препинания **всегда выводятся вполширины** (размер
+MSZ), отдельного ключа для этого не нужно. В строку их помещается 31.
 
-| Carried over | Skipped |
+Выглядят они разреженно, и это не ошибка: шрифт приёмника моноширинный,
+каждая буква занимает половину клетки целиком, поэтому у узких «i» и «l»
+остаются большие промежутки. Так латиница выглядит и в настоящем японском
+вещании.
+
+Если строк не хватает по длине, расширьте область субтитров (см. 5.4).
+
+В режиме `--encoding utf8` ширина та же: ASCII и кириллица идут вполширины,
+знаки восточноазиатской ширины - в полную клетку.
+
+### 5.2. Два режима ширины кириллицы
+
+```bash
+--cyrillic full    # по умолчанию: 15 букв в строке
+--cyrillic half    # 30 букв в строке
+```
+
+В режиме `full` кириллица занимает полную клетку, как иероглифы. Выглядит
+как в эфире, но строки короткие: средняя реплика в 32 знака займёт три
+строки.
+
+В режиме `half` буквы выводятся вполширины, приёмник сжимает глифы вдвое.
+В строку помещается 30 знаков. Для русских субтитров к аниме это обычно
+удобнее. Оборотная сторона - на шрифте деки сжатые буквы читаются хуже,
+например «е» может выглядеть как «с».
+
+### 5.3. Знаки, которых нет в JIS X 0208
+
+Кириллица есть, но нет «ёлочек», „лапок“, украинских і ї є ґ и белорусской ў.
+Два пути:
+
+**Замены** (по умолчанию, ничего делать не надо):
+
+| Было | Стало |
 |---|---|
-| text, `\N`, `\h` | drawings `\p1` |
-| alignment `\an`, `\a`, margins | rotation `\frz` `\frx` `\fry` |
-| position `\pos` (for `\move`, the start point) | scaling `\fscx` `\fscy`, shear `\fax` |
-| primary colour `\c` `\1c` `\r` -> 8 colours | animation `\t`, fades `\fad` |
-| size `\fs` -> normal or small | border, shadow, blur, `\clip` |
-| an alpha of `\alpha` = FF -> not shown | fonts `\fn`, bold, italic |
-| wrapping `\q2` | karaoke `\k`, the Effect field |
+| « » | ≪ ≫ |
+| „ “ | “ ” |
+| ‹ › | 〈 〉 |
+| і | i |
+| ї є ґ ў | 〓 (с предупреждением) |
 
-The script prints a summary: how many events were skipped and which tags were
-ignored.
+**DRCS** - знак рисуется картинкой прямо в потоке, ровно тем же
+механизмом, каким вещатель передаёт свои особые символы:
 
-### 6.2. Composing the screen
+```bash
+--drcs-font auto                        # найти системный шрифт с кириллицей
+--drcs-font /path/to/PTSans-Bold.ttf    # указать свой
+```
 
-ARIB shows one whole screen at a time, not independent signs. Therefore:
+Нужен Pillow. Знаки рисуются 36×36 в четыре градации яркости. Так
+получаются настоящие «ёлочки» и украинские буквы. Ограничение - до 94
+разных знаков на одну фразу.
 
-- simultaneous events are composed onto **one screen** without overlaps;
-- per-frame duplicated signs (tracking an object) are **collapsed** into a
-  single static one;
-- the lines of one sign are grouped into a **block**, ordered with the `\frz`
-  rotation taken into account.
+### 5.4. Область субтитров
 
-### 6.3. Dialogue only
+По умолчанию область повторяет вещательную: 620×480 от точки (170, 30),
+то есть 31 полуклетка - 15 иероглифов или 31 латинская буква в строке.
+Для английских и русских субтитров это тесновато.
 
-If you want the dialogue without signs and karaoke:
+```bash
+--area 880x480+40+30     # 44 знака в строке вместо 31
+```
+
+Формат: `ШxВ+X+Y` внутри плоскости 960×540. Ширина округляется до 20 точек,
+высота до 60. Скрипт печатает получившийся предел:
+
+```
+субтитры: PID 0x0130 tag 0x30 eng; область 880x480+40+30, до 44 знаков в строке
+```
+
+Пример разницы на реплике в 62 знака:
+
+| Область | Раскладка |
+|---|---|
+| 620×480+170+30 | 3 строки: 21 + 20 + 21 |
+| 880×480+40+30 | 2 строки: 26 + 36 |
+
+Имейте в виду: чем шире область, тем ближе текст к краям кадра, а деки и
+телевизоры часть края обрезают. 880 точек из 960 - это примерно 92 %
+ширины, ещё безопасно; дальше лучше проверять на своём экране.
+
+---
+
+## 6. Файлы ASS
+
+### 6.1. Что переносится, а что нет
+
+ASS гораздо богаче, чем ARIB. Переносится то, что у ARIB есть:
+
+| Переносится | Пропускается |
+|---|---|
+| текст, `\N`, `\h` | рисунки `\p1` |
+| выравнивание `\an`, `\a`, поля | повороты `\frz` `\frx` `\fry` |
+| позиция `\pos` (у `\move` - начальная) | масштаб `\fscx` `\fscy`, наклон `\fax` |
+| основной цвет `\c` `\1c` `\r` → 8 цветов | анимации `\t`, затухания `\fad` |
+| размер `\fs` → обычный или малый | обводка, тень, размытие, `\clip` |
+| прозрачность `\alpha` = FF → не показывать | шрифты `\fn`, жирный, курсив |
+| перенос `\q2` | караоке `\k`, поле Effect |
+
+Скрипт печатает сводку: сколько событий пропущено и какие теги
+проигнорированы.
+
+### 6.2. Компоновка экрана
+
+ARIB показывает один экран целиком, а не независимые надписи. Поэтому:
+
+- одновременные события собираются в **один экран** без наложений;
+- покадрово размноженные надписи (трекинг за объектом) **склеиваются**
+  в одну статичную;
+- строки одной надписи собираются в **блок**, порядок строк определяется
+  с учётом поворота `\frz`.
+
+### 6.3. Только реплики
+
+Если нужны только диалоги, без надписей и караоке:
 
 ```bash
 python3 arib_caption_mux.py in.m2t episode.ass -o out.m2t --ass-dialogue-only
 ```
 
-The decision is made in two stages.
+Решение принимается в два этапа.
 
-**A style is dropped** if its name speaks of signs or songs (`Signs`,
-`FrierenSigns`, `OP-Romaji`, `ED`, `Karaoke`, `Notes`, `Title`), or if plain
-text makes up less than 70 % of it — unless there are 20 or more plain lines
-and they make up at least 40 %.
+**Стиль отбрасывается**, если его имя говорит о надписях или песнях
+(`Signs`, `FrierenSigns`, `Надписи`, `OP-Romaji`, `ED`, `Karaoke`,
+`Notes`, `Title`), либо если обычного текста в нём меньше 70 % - кроме
+случая, когда обычных строк набралось 20 и больше и это хотя бы 40 %.
 
-**An event is dropped** even inside a dialogue style if it carries `\pos`
-away from the style's own anchor, `\move`, `\k`, `\clip`, `\org`, rotation,
-shear, a drawing, an fx Effect field or a "sign" Name field.
+**Событие отбрасывается** даже в стиле реплик, если в нём есть `\pos`
+не в стандартной точке стиля, `\move`, `\k`, `\clip`, `\org`, поворот,
+наклон, рисунок, fx в поле Effect или слово «надпись» в поле Name.
 
-To see the verdict before building:
+Посмотреть решение до сборки:
 
 ```bash
 python3 arib_caption_mux.py in.m2t episode.ass -o x --ass-list-styles
 ```
 
 ```
-Style                  events   plain  verdict   reason / sample
-SubBN                     305    100%  dialogue  plain text 100%  "Do not overcomplicate..."
-FrierenSigns              288      0%  skipped   by name: signs
-opmieruko                 240      0%  skipped   signs: drawings in 100% of events
-SentaiFont                144      0%  skipped   signs: \pos in 100% of events
+Стиль                  событ.  обычн.  решение   причина / пример
+SubBN                     305    100%  реплики   обычный текст 100%  «Ничего не усложняй…»
+FrierenSigns              288      0%  пропуск   по имени: надписи
+opmieruko                 240      0%  пропуск   надписи: рисунки в 100% событий
+SentaiFont                144      0%  пропуск   надписи: \pos в 100% событий
 ```
 
-If the heuristic gets it wrong, override it:
+Если эвристика ошиблась, решение правится вручную:
 
 ```bash
---ass-only-styles Default,Italics     # only these styles
---ass-skip-styles Songs,Notes         # never these
+--ass-only-styles Default,Italics     # только эти стили
+--ass-skip-styles Songs,Notes         # эти не показывать
 ```
 
-### 6.4. Other ASS options
+### 6.4. Прочие ключи ASS
 
-| Option | Meaning |
+| Ключ | Смысл |
 |---|---|
-| `--ass-signs place` | signs stay where they are (default) |
-| `--ass-signs top` | every sign goes to the top of the screen |
-| `--ass-signs skip` | signs are not shown |
-| `--ass-small ssz` | small text in the small ARIB size (default) |
-| `--ass-small normal` | small text in the normal size |
-| `--ass-min-duration 0.3` | shorter screens merge into the previous one |
+| `--ass-signs place` | надписи на своём месте (по умолчанию) |
+| `--ass-signs top` | все надписи вверху экрана |
+| `--ass-signs skip` | надписи не показывать |
+| `--ass-small ssz` | мелкий текст малым размером ARIB (по умолчанию) |
+| `--ass-small normal` | мелкий текст обычным размером |
+| `--ass-min-duration 0.3` | экраны короче поглощаются предыдущим |
 
-A note on `--ass-small ssz`: the small size in ARIB is meant for ruby text,
-so libaribcaption and ffmpeg in text mode do not print such rows although
-they do draw them in a picture. If you check the result with those tools and
-the small text seems to have vanished, that is why.
+Замечание про `--ass-small ssz`: малый размер в ARIB используется для
+фуриганы, поэтому libaribcaption и ffmpeg в текстовом режиме такие строки
+не выводят, хотя на картинке рисуют. Если проверяете результат через них
+и мелкий текст «пропал» - это оно.
 
 ---
 
-## 7. Audio
+## 7. Звук
 
-### 7.1. Why replace the audio
+### 7.1. Зачем менять звук
 
-Japanese broadcast audio is AAC. If the source carries AC-3, MP3 or MP2, a
-Japanese deck will not play it. The script encodes the audio to MPEG-2 AAC-LC
-48 kHz and packs it the way a broadcaster does: PES of 736 bytes, exactly
-four TS packets, with a PTS on those PES where a frame starts.
+В японском вещании звук - AAC. Скрипт кодирует звук в MPEG-2 AAC-LC
+48 кГц и упаковывает так же, как вещатель: PES по 736 байт, ровно четыре
+TS-пакета, с PTS на тех PES, где начинается кадр.
 
-### 7.2. One track
+### 7.2. Одна дорожка
 
 ```bash
 python3 arib_caption_mux.py in.m2t subs.srt -o out.m2t --audio dub.wav
 ```
 
-WAV, FLAC and anything ffmpeg can read are accepted, as are ready-made `.aac`
-(ADTS), `.mp2`, `.mpa` and `.m2a` files.
+Принимаются WAV, FLAC и всё, что читает ffmpeg, а также готовые `.aac`
+(ADTS), `.mp2`, `.mpa`, `.m2a`.
 
-### 7.3. Several tracks
+### 7.3. Несколько дорожек
 
 ```bash
 python3 arib_caption_mux.py in.m2t subs.ass -o out.m2t \
-    --audio jp.wav --audio en.wav \
-    --audio-lang jpn,eng --audio-name "Japanese" --audio-name "English" \
+    --audio jp.wav --audio ru.wav \
+    --audio-lang jpn,rus --audio-name 日本語 --audio-name Русский \
     --audio-bitrate 256,192
 ```
 
-Tracks keep the order you gave, with component_tag 0x10, 0x11 and so on. The
-first is the main component. Languages and names go into the EIT and SIT
-descriptors.
+Дорожки идут в заданном порядке, component_tag 0x10, 0x11…. Первая
+считается основной (main_component_flag). Языки и названия попадают в
+дескрипторы EIT и SIT.
 
-The PID of the first track defaults to that of the audio it replaces (the
-original AC-3 in the example above); the rest get free ones. With
-`--arib-pids` the numbering becomes the broadcast one: 0x0110, 0x0111 and up.
+PID первой дорожки по умолчанию берётся от заменяемого звука (в примере
+выше это будет PID исходного AC-3), остальные получают свободные.
+С `--arib-pids` нумерация приводится к эфирной: 0x0110, 0x0111 и далее.
 
-`--keep-audio` leaves the source audio in place and appends the new tracks
-after it.
+`--keep-audio` оставляет исходный звук и добавляет новые дорожки после него.
 
-### 7.4. 5.1
+### 7.4. Звук в 5.1
 
 ```bash
 --audio surround.wav --audio-channels 6 --audio-bitrate 384
 ```
 
-The channel count defaults to whatever the WAV has (1, 2 or 6). For 5.1 the
-descriptor gets type 0x09, which is 3/2+LFE in ARIB terms. Channel order is
-preserved with no reshuffling (verified by running a different tone through
-each channel). Default bit rates are 384 kbit/s for 5.1, 256 for stereo and
-144 for mono.
+Канальность по умолчанию берётся из WAV (1, 2 или 6). Для 5.1 в
+дескрипторе проставляется тип 0x09 - это 3/2+LFE по ARIB. Порядок каналов
+сохраняется без перестановки (проверено прогоном тонов по каналам).
+Битрейт по умолчанию 384 кбит/с для 5.1, 256 для стерео, 144 для моно.
 
-### 7.5. MP2 for decks from other makers
+### 7.5. MP2 для дек других производителей
 
-Decks that grew out of DVB rather than ISDB expect MPEG audio, not AAC. The
-usual build carries both tracks:
+Деки других производителей чаще всего ждут поток MPEG-audio, а не AAC.
+Обычная сборка - две дорожки сразу:
 
 ```bash
 python3 arib_caption_mux.py in.m2t subs.ass -o out.m2t \
     --audio jp.wav --audio-mp2 jp.wav
 ```
 
-The first goes out as AAC (stream_type 0x0F) for Japanese decks, the second
-as MPEG-1 Layer II (stream_type 0x03) for the rest.
+Первая пойдёт AAC (stream_type 0x0F) для японских дек, вторая -
+MPEG-1 Layer II (stream_type 0x03) для остальных.
 
-Layer II is never multichannel: 5.1 in such a track is downmixed to stereo.
-The bit-rate ceiling is 384 kbit/s for stereo and 192 for mono.
+Layer II многоканальным не бывает: 5.1 в такой дорожке сводится в стерео.
+Потолок битрейта - 384 кбит/с для стерео, 192 для моно.
 
-### 7.6. Dolby Digital (AC-3), the audio of D-Theater tapes
+### 7.6. Dolby Digital (AC-3) — звук лент D-Theater
 
-Commercial D-Theater tapes shipped with Dolby Digital: the sleeve typically
-lists "English (5.1 Surround)" and "English (Stereo)".
+Коммерческие ленты D-Theater выпускались с Dolby Digital: на обложке
+типично «English (5.1 Surround)» и «English (Stereo)».
 
 ```bash
 python3 arib_caption_mux.py my.m2t -o out.m2t \
@@ -561,710 +550,441 @@ python3 arib_caption_mux.py my.m2t -o out.m2t \
     --audio-lang eng,eng --audio-name "English 5.1" --audio-name "English Stereo"
 ```
 
-The PMT gets `stream_type` 0x81 and the PES `stream_id` 0xBD. The standard
-demands 48 kHz and no more than 640 kbit/s; mode 1+1 is forbidden. Defaults
-are 576 kbit/s for 5.1 (as on tapes), 192 for stereo and 96 for mono. A
-ready-made `.ac3` is taken as it is.
+В PMT получается `stream_type` 0x81, PES с `stream_id` 0xBD. Стандарт
+требует 48 кГц и не больше 640 кбит/с; режим 1+1 запрещён. По умолчанию
+448 кбит/с для 5.1 (на лентах также встречается 576 кбит/с), 192 для стерео, 96 для моно. 
+Готовый `.ac3` берётся как есть.
 
-Verified on hardware: the Victor HM-DHX1 and HM-DH30000 both play AC-3 and
-MP2 as well as AAC, even though Japanese broadcast uses only AAC.
+Проверено на железе: японские деки воспроизводят и AC-3, и MP2, хотя
+японское вещание ими не пользуется.
 
-### 7.7. DTS
+### 7.7. Линейный PCM (SMPTE 302M)
 
-Some D-Theater tapes carry DTS instead of, or alongside, Dolby Digital.
-
-```bash
---audio-dts surround.wav
-```
-
-The PMT gets `stream_type` 0x82 with a `DTS ` registration descriptor (the
-identifier is padded with a space) and the PES `stream_id` 0xBD. The standard
-demands 48 kHz, frames of 512 samples and a constant bit rate between
-188.25 and 1509.75 kbit/s; mode 1+1 is not among the listed ones. Defaults
-are 1509.75 kbit/s for 5.1 (as on tapes), 768 for stereo and 384 for mono. A
-ready-made `.dts` is taken as it is.
-
-ffmpeg's DTS encoder is marked experimental, so the script passes
-`-strict -2` for it.
-
-A word of warning about hardware: none of the Victor decks here decodes DTS.
-The DHX2 could pass it out over the optical output as a bitstream, nothing
-more. So a DTS track is worth adding only to reproduce a tape faithfully, or
-for an external decoder -- not for listening through the deck.
-
-### 7.8. Linear PCM (SMPTE 302M)
-
-Besides compressed audio the D-VHS standard allows linear PCM. That is what a
-deck writes in its own STD recordings, and it is also found on D-Theater
-tapes.
+Кроме сжатого звука стандарт D-VHS допускает линейный PCM. Именно им дека
+пишет собственные записи в режиме STD, встречается он и на лентах
+D-Theater.
 
 ```bash
 --audio-pcm dub.wav
 ```
 
-Always 48 kHz, 16-bit, stereo — the standard permits nothing else. The PMT
-gets `stream_type` 0x83 and the PES `stream_id` 0xBD, one chunk per 33 ms
-(one video frame). The stream takes 1.54 Mbit/s, noticeably more than AAC,
-which is worth remembering for STD and its 14.1 Mbit/s ceiling.
+Всегда 48 кГц, 16 бит, стерео — других вариантов стандарт не разрешает.
+В PMT получается `stream_type` 0x83, PES с `stream_id` 0xBD, по одному
+куску на 33 мс (как кадр видео). Поток занимает 1,54 Мбит/с, то есть
+заметно больше AAC: на STD с его пределом 14,1 Мбит/с это стоит учитывать.
 
-**Bit order.** In the 20-bit SMPTE 302M field four bits are status and
-sixteen are audio. A deck and ffmpeg lay them out in opposite orders: the
-deck puts the status bits first, ffmpeg puts them last. Worked out from a
-deck recording: parsed the deck's way, the audio matches the MP2 track of the
-same file with a correlation of 0.98; parsed ffmpeg's way it is noise.
+**Порядок бит.** В 20-битном поле 302M четыре бита служебные, шестнадцать —
+звук. Дека и ffmpeg кладут их в разном порядке: дека ставит служебные
+биты первыми, ffmpeg — последними. Определено по записи с деки: при
+разборе «по-дековски» звук совпадает с дорожкой MP2 того же файла с
+корреляцией 0,98, при разборе «по-ffmpeg» выходит шум.
 
-By default the script writes the deck's order. `--pcm-bit-order ffmpeg`
-switches to the other one — such a file is read correctly by ffmpeg and
-software players, but probably not by a deck.
+По умолчанию скрипт пишет в порядке деки. `--pcm-bit-order ffmpeg`
+переключает на второй вариант — такой файл правильно прочитают ffmpeg и
+программные плееры, но, скорее всего, не дека.
 
-### 7.9. What the D-VHS standard demands of audio
+### 7.8. Требования стандарта D-VHS к звуку
 
-Annex A.2.8 of IEC 60774-5 (BS EN 60774-5:2004) lists the audio a deck must
-accept. The script checks the tracks against those points and warns about
-violations:
+Приложение A.2.8 стандарта IEC 60774-5 (BS EN 60774-5:2004) задаёт, какой
+звук дека обязана принимать. Скрипт проверяет дорожки по этим пунктам и
+предупреждает о нарушениях:
 
-| Requirement | How it is met |
+| Требование | Как выполняется |
 |---|---|
-| AAC of the LC profile only | LC is what we encode |
-| Sample rate 32, 44.1 or 48 kHz | 48 kHz by default |
-| CRC mandatory in the stream | fdkaac for AAC, `-error_protection` for MP2 |
-| `adts_buffer_fullness` not 0x7FF | fdkaac writes a sane value |
-| One `raw_data_block` per frame | that is what we do |
-| AAC no more than 288 kbit/s per channel | 256 stereo, 384 for 5.1, with room to spare |
-| Multichannel AAC up to 3/2+LFE | 5.1 explicitly allowed |
-| Layer II up to 384 kbit/s | the ceiling is checked |
-| AC-3 up to 640 kbit/s, no mode 1+1 | checked |
-| DTS 48 kHz, 512-sample frames, 188.25-1509.75 kbit/s | checked |
+| AAC только профиля LC | кодируем LC |
+| Частота 32, 44,1 или 48 кГц | по умолчанию 48 кГц |
+| CRC обязателен в потоке | fdkaac для AAC, `-error_protection` для MP2 |
+| `adts_buffer_fullness` ≠ 0x7FF | у fdkaac нормальное значение |
+| Один `raw_data_block` на кадр | так и есть |
+| AAC не больше 288 кбит/с на канал | 256 стерео, 384 на 5.1 - с запасом |
+| Многоканальный AAC до 3/2+LFE | 5.1 разрешён явно |
+| Layer II до 384 кбит/с | потолок проверяется |
 
-Two of those were being violated before the standard turned up: MP2 was
-encoded without CRC, and ffmpeg's AAC additionally sets
-`adts_buffer_fullness` to 0x7FF, which the standard forbids. MP2 now always
-carries CRC, and the script warns about ffmpeg's AAC — one more reason to
-install fdkaac.
 
-### 7.10. Encoder delay
+### 7.9. Задержка кодировщика
 
-Every encoder adds delay: the decoded audio comes out later than the source.
-Ignore it and the audio drifts against the video. The script compensates
-automatically:
+Любой кодировщик вносит задержку: декодированный звук выходит позже
+исходного. Если её не учесть, звук уедет относительно видео. Скрипт
+компенсирует её автоматически:
 
-| Source | Delay, samples | Where the figure comes from |
+| Источник | Задержка, отсчётов | Откуда значение |
 |---|---|---|
-| fdkaac | 2048 | measured with a click |
-| ffmpeg aac | 1024 | measured with a click |
-| libtwolame / ffmpeg mp2 | 482 | the Layer II filterbank |
-| ffmpeg ac3 | 256 | measured with a click |
-| ffmpeg dca (DTS) | 518 | measured with a click |
-| ready-made `.mp2` | 482 | fixed by the format, the same for every encoder |
-| ready-made `.aac` | 2048 | an assumption: fdkaac, Apple and Nero use it |
+| fdkaac | 2048 | измерено на щелчке |
+| ffmpeg aac | 1024 | измерено на щелчке |
+| libtwolame / ffmpeg mp2 | 482 | фильтрбанк Layer II |
+| готовый `.mp2` | 482 | задана форматом, одна для всех кодировщиков |
+| готовый `.aac` | 2048 | предположение: так у fdkaac, Apple, Nero |
 
-For a ready-made AAC the encoder is unknown and the script says so. If the
-file came from ffmpeg's built-in encoder, correct it by hand:
+Для готового AAC кодировщик неизвестен, и скрипт об этом пишет. Если
+файл сделан встроенным кодировщиком ffmpeg, поправьте вручную:
 
 ```bash
 --audio-aac track.aac --audio-delay-samples 1024
 ```
 
-To shift a whole track use `--audio-offset 0,-0.12` (per track, in seconds).
-
-### 7.11. How far ahead the audio is handed out
-
-`--audio-lead` (0.16 s by default) says how far ahead of its own PTS an audio
-PES goes out, matching the reference capture. The point is the receiver's
-elementary stream buffer: hand the audio out too early and the buffer
-overflows, which shows up as an occasional loud click rather than as silence.
-
-The multiplexer interpolates time between PCRs to spread its packets, and
-that interpolation is deliberately not allowed to run far past the last PCR.
-Measured over five minutes, with a source whose PCR is 66.7 ms apart:
-
-| | PTS minus PCR | spread |
-|---|---|---|
-| unclamped interpolation | +0.137 .. +0.311 s | 174 ms |
-| clamped to a quarter of the PCR interval | +0.103 .. +0.198 s | 95 ms |
-| the off-air reference | +0.129 .. +0.181 s | 52 ms |
-
-If a deck still produces clicks on an AAC track, try a smaller lead, say
-`--audio-lead 0.10`: it gives the buffer more headroom at the cost of less
-margin against late delivery.
+Сдвинуть дорожку целиком можно через `--audio-offset 0,-0.12`
+(по дорожкам, в секундах).
 
 ---
 
-## 8. Service information
+## 8. Служебные таблицы
 
-### 8.1. Four modes
-
-```bash
---si partial      # default: PAT, PMT, SIT, DIT -- for recording onto D-VHS
---si broadcast    # like on air: PAT, PMT, NIT, SDT, EIT, TOT, BIT
---si deck         # exactly what an HM-DH30000 writes when it re-encodes
---si both         # both sets
---si keep         # touch nothing, only add captions and audio
-```
-
-`--no-partial-ts` is the same as `--si keep` (a leftover from early versions).
-
-**`partial`** is what a tuner sends over i.LINK. The surplus tables (NIT,
-SDT, EIT, TOT, BIT, SDTT, ECM, null packets) are dropped and a SIT describing
-the recording goes out once a second instead. This is the right mode for tape.
-
-**`broadcast`** makes the file look like an off-air recording to players,
-MediaInfo and EPG readers. It is redundant for tape but handy for an archive.
-
-### 8.1.1. The decks' own layouts: --deck-profile
-
-`--si deck` reproduces the partial TS a deck writes when it re-encodes a
-recording itself. The catch is that decks disagree: LS3 recordings from three
-of them differ in nearly every field, so the mode takes a profile.
+### 8.1. Четыре режима
 
 ```bash
---si deck --deck-profile victor-dh30000   # default
---si deck --deck-profile victor-dhx1
---si deck --deck-profile hitachi
+--si partial      # по умолчанию: PAT, PMT, SIT, DIT - для записи на D-VHS
+--si broadcast    # как в эфире: PAT, PMT, NIT, SDT, EIT, TOT, BIT
+--si both         # оба набора
+--si keep         # ничего не трогать, только субтитры и звук
 ```
 
-| | Victor HM-DH30000 | Victor HM-DHX1 | Hitachi DT-DR20000 |
-|---|---|---|---|
-| PAT programme / PMT PID | 1 / 0x006E | 1 / 0x006E | 100 / 0x1050 |
-| PCR | inside the video | own PID 0x0FFF | own PID 0x1010 |
-| PCR interval | 16-17 ms | 49.9 ms | 38-39.5 ms |
-| Video / audio PID | 0x1000 / 0x1001 | 0x1000 / 0x1002 | 0x1020 / 0x1040 |
-| registration MTRM | version 0x10 | version 0x10 | **version 0x07, country JPN** |
-| Other PMT descriptors | maximum_bitrate, DTCP | maximum_bitrate, DTCP | DTCP, maximum_bitrate, ARIB 0xC1 |
-| SIT | 56 bytes, components and captions, running 4 | 44 bytes, components with language `und`, running 0 | 28 bytes, empty service loop, running 0 |
-| SIT repetition | with every PAT | with every PAT | about once a second |
-| DIT | yes | no | yes |
-| LS3 video | 544x480 16:9 | 544x480 4:3 | 720x480 4:3 |
-| LS3 audio | MP2 256 kbit/s | MP2 256 kbit/s | MP2 384 kbit/s |
+`--no-partial-ts` - то же самое, что `--si keep` (осталось от ранних версий).
 
-Each profile copies its deck field for field; against the samples, the PAT,
-the PCR PID and every PMT descriptor match byte for byte, and the SIT comes out
-at the deck's exact size.
+**`partial`** - то, что отдаёт тюнер по i.LINK. Лишние таблицы (NIT, SDT,
+EIT, TOT, BIT, SDTT, ECM, null-пакеты) выбрасываются, вместо них раз в
+секунду выходит SIT с описанием записи. Это правильный режим для ленты.
 
-**The most likely reasons a Hitachi refuses a Victor-shaped stream** are the
-two that stand out in that table. The MTRM descriptor on the Hitachi is an
-older layout -- version 0x07 followed by a country code -- where both Victor
-decks and the standard use version 0x10; firmware that checks the version
-would reject anything else. And both the Hitachi and the DHX1 carry the PCR
-on a PID of its own, in packets with no payload, while the HM-DH30000 keeps it
-inside the video.
+**`broadcast`** делает файл похожим на эфирную запись для плееров,
+MediaInfo и EPG. Для ленты он избыточен, для архива - удобен.
 
-**A dedicated PCR PID** is built like this. The PCR is lifted out of the video
-packets, whose adaptation field keeps everything else, and sent as a payload-
-free packet on the new PID at the deck's own interval. On a constant-rate
-source the value is computed from the packet's position in the output, over a
-long baseline, so it is exact: the samples measure within 0.1 us of a straight
-line, the same as the decks themselves. If no free slot turns up in time, the
-PCR is inserted anyway and the next free slot is left out to pay for it.
+### 8.2. Что попадает в таблицы
 
-**Every free slot is filled.** On a constant-rate source every place the
-source had a null packet -- or its own PAT and PMT, which are replaced -- is
-filled with one of our packets or a null, one for one. That keeps the output
-exactly at the encoder's rate, the peak equal to the average, and the PCR
-positions untouched.
+При `--si broadcast` скрипт строит по модели эфирных таблиц:
 
-On the HM-DH30000 recording in particular:
-
-* the deck **kept both caption languages** through the re-encode, caption 1
-  and caption 2, with the management packet declaring two;
-* it **transcoded the audio to MPEG-1 Layer II** -- the broadcast AAC did not
-  survive LS3;
-* copy control travelled **only in the DTCP descriptor**, with no ARIB
-  0xC1/0xDE anywhere -- exactly as the standard says it should for D-VHS. The
-  Hitachi is the exception: it carries ARIB 0xC1 next to DTCP.
-
-The Hitachi recording also carries a private stream on PID 0x1030
-(data_component_id 0x0001) whose payload looks like line-21 closed-caption
-data from its analogue input. The profile does not reproduce it.
-
-`tsinfo.py` shows the MTRM version and country and whether the PCR sits on
-its own PID, so a stream can be checked against a deck before recording.
-
-### 8.2. What goes into the tables
-
-With `--si broadcast` the script builds, modelled on the broadcast tables:
-
-| Table | Period | Contents |
+| Таблица | Период | Содержимое |
 |---|---|---|
-| NIT | 10 s | network name, service list, satellite parameters |
-| SDT | 3 s | service and provider names |
-| EIT p/f | 3 s | the current event: title, genre, components |
-| EIT schedule | 10 s | a basic schedule (one event, your recording) |
-| TOT | 5 s | the time in JST |
-| BIT | 10 s | the broadcaster and the table repetition periods |
+| NIT | 10 с | название сети, список сервисов, параметры спутника |
+| SDT | 3 с | название канала и вещателя |
+| EIT p/f | 3 с | текущая передача: название, жанр, компоненты |
+| EIT расписание | 10 с | базовое расписание (одна передача - ваша запись) |
+| TOT | 5 с | время по JST |
+| BIT | 10 с | вещатель и периоды повтора таблиц |
 
-The video and audio descriptors are derived from the ES themselves:
-resolution, scan, aspect ratio, channel count and sample rate.
+Дескрипторы видео и звука вычисляются из самих ES: разрешение,
+развёртка, соотношение сторон, число каналов и частота.
 
-### 8.3. The genre is read from two different tables
+### 8.3. Жанр читается по двум разным таблицам
 
-`--genre` writes the value from the ARIB STD-B10 table. Players, MediaInfo
-and other tools that grew out of DVB take the names from their own table
-(EN 300 468), where the same numbers mean something else entirely:
+`--genre` пишет в поток значение по таблице ARIB STD-B10. Плееры, MediaInfo
+и прочие инструменты, выросшие из DVB, берут названия из своей таблицы
+(EN 300 468), а номера там означают совсем другое:
 
-| `--genre` | Number | Name in ARIB | What DVB tools call it |
+| `--genre` | Номер | Название в ARIB | Как назовут DVB-инструменты |
 |---|---|---|---|
-| `news` | 0 | news | undefined |
-| `sports` | 1 | sports | Movie/Drama |
-| `info` | 2 | information | News/Current affairs |
-| `drama` | 3 | drama | Show/Game show |
-| `music` | 4 | music | Sports |
-| `variety` | 5 | variety | Children's/Youth |
-| `movie` | 6 | movie | Music/Ballet/Dance |
-| `anime` | 7 | anime | Arts/Culture |
-| `documentary` | 8 | documentary | Social/Political/Economics |
-| `theatre` | 9 | theatre | Education/Science/Factual |
-| `hobby` | A | hobby | Leisure hobbies |
-| `welfare` | B | welfare | Special characteristics |
+| `news` | 0 | новости | undefined |
+| `sports` | 1 | спорт | Movie/Drama |
+| `info` | 2 | информационные | News/Current affairs |
+| `drama` | 3 | драма | Show/Game show |
+| `music` | 4 | музыка | Sports |
+| `variety` | 5 | варьете | Children's/Youth |
+| `movie` | 6 | кино | Music/Ballet/Dance |
+| `anime` | 7 | аниме | Arts/Culture |
+| `documentary` | 8 | документальное | Social/Political/Economics |
+| `theatre` | 9 | театр | Education/Science/Factual |
+| `hobby` | A | хобби | Leisure hobbies |
+| `welfare` | B | социальное | Special characteristics |
 
-So `--genre movie` showing up in MediaInfo as "music/ballet/dance" is not a
-mistake: the value in the file is right, only the caption comes from a
-foreign table. A Japanese deck reads it as "movie". The two tables cannot be
-satisfied at once, there is only one value in the descriptor. The script
-prints both readings so this does not confuse anyone.
+Так что `--genre movie`, показанный MediaInfo как «music/ballet/dance», -
+это не ошибка: в файле лежит верное значение, просто подпись взята из
+чужой таблицы. Японская дека прочитает его как 映画. Совместить обе
+таблицы нельзя, значение в дескрипторе одно. Скрипт печатает обе подписи,
+чтобы это не сбивало с толку.
 
-The table was checked against the off-air capture: the anime channel carries
-7 in its EIT.
+Таблица сверена с эфирным образцом: у аниме-канала в EIT стоит 7.
 
-### 8.4. Description length
+### 8.4. Длина описания
 
-A single descriptor in a TS is at most 255 bytes, so about 230 characters of
-description fit into short_event. Anything longer moves into a chain of
-extended_event descriptors (0x4E), the way broadcasters do it: up to 16
-parts, which the receiver joins back together. If even that is not enough the
-tail is dropped with a warning, because an EIT section cannot exceed 4096
-bytes.
+Длина одного дескриптора в TS - один байт, поэтому в short_event помещается
+около 230 знаков описания. Всё, что длиннее, уходит в цепочку
+extended_event (0x4E), как это делают вещатели: до 16 частей, приёмник
+склеивает их обратно. Если и этого мало, хвост отбрасывается с
+предупреждением - секция EIT не может превышать 4096 байт.
 
-### 8.5. Where the names come from
+### 8.5. Откуда берутся названия
 
-For a stream that did not come from Japanese broadcast, everything is set by
-options:
+Для потока не из японского эфира всё задаётся ключами:
 
 ```bash
---service-name "BS Test"        # service name
---provider-name "Test Network"  # provider
---event-name "Episode 1"        # event title
---event-text "Description"      # description of any length
---genre anime                   # genre
---jst "2026-08-02 07:00:00"     # recording time
+--service-name "ＢＳテスト"      # название канала
+--provider-name "テスト放送"     # вещатель
+--event-name "Серия 1"          # название передачи
+--event-text "Описание"         # описание любой длины
+--genre anime                   # жанр
+--jst "2026-08-02 07:00:00"     # время записи
 --out-service-id 171            # service_id
 --ts-id 0x4012                  # transport_stream_id
---network-id 4                  # network (4 = BS)
+--network-id 4                  # сеть (4 = BS)
 ```
 
-Strings are encoded into ARIB, so Japanese, Latin and Cyrillic names work
-alike. Without `--jst` the time is taken from the file date.
+Строки кодируются в ARIB, поэтому русские и японские названия работают
+одинаково. Если `--jst` не задан, время берётся из даты файла.
 
-A Japanese stream that already has the tables is left alone by default: the
-script says so and keeps the source SI. To rebuild it anyway, use
+Японский поток, где таблицы уже есть, по умолчанию не трогается:
+скрипт напишет об этом и оставит исходные SI. Перестроить принудительно -
 `--si-regenerate`.
 
-### 8.6. Broadcast PID numbering
+### 8.6. Эфирная нумерация PID
 
 ```bash
 --arib-pids
 ```
 
-Renumbers the PIDs the broadcast way: PMT 0x01F0, video 0x0100, audio 0x0110
-and up, a separate PCR on 0x01FF.
+Переназначает PID как в эфире: PMT 0x01F0, видео 0x0100, звук 0x0110 и
+далее, отдельный PCR 0x01FF.
 
-### 8.7. What the script does not do
+### 8.7. Чего скрипт не делает
 
-It never generates ECM or EMM (conditional access), SDTT (receiver firmware
-updates), CDT (logos) or BML data carousels. The first would make the stream
-formally scrambled; the rest have nothing to do with your recording.
-
----
-
-## 8.8. D-Theater tape mode
-
-Commercial tapes are laid out differently from an off-air recording. Read off
-a demo tape and checked against the standard:
-
-| | broadcast partial TS | D-Theater tape |
-|---|---|---|
-| Tables | PAT, PMT, SIT, DIT | PAT and PMT only |
-| Rate | variable, nulls stripped | constant, padded with nulls (8.9 % on the tape) |
-| PAT/PMT | about 10 times a second | about 20 times a second |
-| PIDs | PMT 0x01F0, video 0x0100 | PMT 0x0010, video 0x0011, audio 0x0014 |
-| Copy control | ARIB 0xC1 and 0xDE | DTCP_descriptor (0x88) |
-| Mandatory descriptors | — | registration MTRM, maximum_bitrate, smoothing_buffer |
-| Audio | AAC | MPEG-1 Layer II, AC-3, sometimes DTS |
-| Captions | ARIB STD-B24 in a separate ES | closed captions inside the video |
-
-```bash
-python3 arib_caption_mux.py my.m2t -o tape.m2t --dtheater \
-    --audio-mp2 stereo.wav --audio-ac3 surround.wav \
-    --dtheater-rate 25 --dtcp-cci never
-```
-
-The standard says plainly that copy control in D-VHS travels in the
-DTCP_descriptor rather than the ARIB descriptors, and that equipment must not
-alter it. So `--copy` is not used in this mode; instead there are
-`--dtcp-cci` (free, no-more, once, never), `--dtcp-aps`,
-`--dtcp-epn-asserted` and `--dtcp-no-image-constraint`.
-
-The rate is set by `--dtheater-rate`; by default it is the measured peak of
-the source plus headroom. If the actual peak turns out higher than declared,
-the script warns. Our PCR-to-position accuracy is about ±0.6 ms against
-±0.05 ms on a factory tape — it should not affect playback, but the
-difference is there.
-
-### What this mode does not do: encrypting the tape itself
-
-Factory D-Theater tapes are encrypted, and that cannot be reproduced — not by
-descriptors, not by anything else available from inside the transport stream.
-The reason is that the encryption does not live in the stream.
-
-**It is declared in the tape data header.** There is an application-detail
-field there: 0000 means a plain MPEG-2 TS, 0001 a CTP stream, and 1xxx an
-encrypted MPEG-2 TS, with the three `xxx` bits carrying the lower part of the
-region code and the upper part sitting in the neighbouring field. That field
-is written by the deck as it records, and there is no reach from the
-transport stream down to it: it belongs to a layer below the TS. You may
-rewrite the PMT any way you like and application detail will not change.
-
-**It is out of reach at the deck level too.** The standard requires a deck
-that is not designed for such data not to output a playback signal at all.
-That is why the equipment splits into machines that can decrypt and machines
-that cannot: a Mitsubishi HS-HD2000U will not play such cassettes, and
-neither will a Victor HM-DH30000, which has no D-Theater support at all.
-Which models do support it is a property of the individual machine, so check
-yours rather than assuming. But **no consumer deck can encrypt**: the tapes were
-duplicated on licensed equipment, the algorithm was never published and the
-keys were handed out under licence.
-
-**What is available instead is output protection, not tape protection:**
-
-```bash
-python3 arib_caption_mux.py my.m2t -o tape.m2t --dtheater --dtcp-cci never
-```
-
-On playback the deck itself becomes a DTCP source and hands the stream out
-over i.LINK encrypted — the very behaviour you see with the "copy one
-generation" flag. That is the protection mechanism that actually works in
-D-VHS; tape encryption stayed with the factory duplication runs.
-
-So `--dtheater` plus `--dtcp-cci never` gives everything that can be had: the
-stream structure, the descriptors and the behaviour on the output all match a
-tape, and only the fact of tape encryption differs.
+Не генерируются ECM и EMM (условный доступ), SDTT (обновления прошивок),
+CDT (логотипы) и карусели данных BML. Первое сделало бы поток формально
+зашифрованным, остальное к записи отношения не имеет.
 
 ---
 
-## 9. Copy-control flags
+## 9. Флаги копирования
 
-### 9.1. Reading them
+### 9.1. Чтение
 
-`--list` shows the values (see 3.1).
+Значения показывает `--list` (см. 3.1).
 
-### 9.2. Writing them
+### 9.2. Запись
 
 ```bash
---copy free           # copy free
---copy once           # copy one generation
---copy never          # copy never
---copy broadcaster    # defined by the broadcaster
---content-availability 0xEF   # the whole 0xDE descriptor byte
+--copy free           # копирование свободно
+--copy once           # одна копия
+--copy never          # копирование запрещено
+--copy broadcaster    # по усмотрению вещателя
+--content-availability 0xEF   # дескриптор 0xDE целиком
 ```
 
-`digital_recording_control_data` alone is not enough. The low four bits of
-the same descriptor are called `user_defined` in the standard, but the ARIB
-operational rules give them meaning:
+Одного `digital_recording_control_data` мало. Младшие четыре бита того же
+дескриптора в стандарте названы `user_defined`, но эксплуатационные
+правила ARIB задают им смысл:
 
-| Bits | Field | Values |
+| Биты | Поле | Значения |
 |---|---|---|
-| 3-2 | `copy_control_type` | 01 = output encrypted with DTCP, 11 = no encryption, 00 and 10 undefined |
-| 1-0 | `APS_control_data` | analogue output protection, 00 = unrestricted |
+| 3–2 | `copy_control_type` | 01 - выход шифруется DTCP, 11 - без шифрования, 00 и 10 не определены |
+| 1–0 | `APS_control_data` | защита аналогового выхода, 00 - без ограничений |
 
-**A `copy_control_type` of 00 is undefined and the receiver treats it as the
-strictest mode.** That is why "copy free" with a zero nibble behaves like
-"copy never".
+**Значение 00 у `copy_control_type` не определено, и приёмник трактует его
+как самый строгий режим.** Поэтому «копирование свободно» с нулевым
+нибблом ведёт себя как «копирование запрещено».
 
-The script fills in the right value itself: 11 (no encryption) for
-`--copy free` and 01 (through DTCP) for the other modes, the way broadcast
-does. That gives 0x0C for free and 0x84 for copy-one-generation — the latter
-matching the off-air capture byte for byte.
+Скрипт подставляет нужное значение сам: для `--copy free` - 11 (без
+шифрования), для остальных режимов - 01 (через DTCP), как это делает
+вещание. Получается 0x0C для free и 0x84 для «одной копии» - последнее
+совпадает с эфирным образцом байт в байт.
 
-To override by hand:
-
-```bash
---copy-control-type protected   # output through DTCP even with copy free
---aps 0                         # analogue output protection bits
---user-defined 4                # the whole nibble at once
-```
-
-### 9.3. Copy free but with protected output (EPN)
-
-A `copy_control_type` of 01 is not enough by itself: output protection is
-switched on by the `encryption_mode` = 0 bit in descriptor 0xDE, and without
-it the receiver hands the stream out in the clear. Verified on a Victor
-HM-DHX1: with `--copy free --copy-control-type protected` the recording
-plays, but goes out over i.LINK unencrypted.
+Переопределить вручную:
 
 ```bash
---epn     # = --copy free + copy_control_type 01 + 0xDE with encryption_mode 0
+--copy-control-type protected   # выход через DTCP даже при copy free
+--aps 0                         # биты защиты аналогового выхода
+--user-defined 4                # весь полубайт сразу
 ```
 
-That gives 0xC1 = 0x04 and 0xDE = 0xEE. If you declare protection only in
-0xC1, the script warns.
+### 9.3. Копирование свободно, но выход под защитой (EPN)
 
-The values go into the PMT, and when SI is generated also into the EIT and
-SIT. Untouched bits are preserved.
+Одного `copy_control_type` = 01 для этого мало: защиту выхода включает бит
+`encryption_mode` = 0 в дескрипторе 0xDE, а без него приёмник отдаёт поток
+в открытом виде. Проверено на JVC HM-DHX1: с `--copy free
+--copy-control-type protected` запись играет, но по i.LINK идёт
+незашифрованной.
 
-### 9.4. Editing only the flags
+```bash
+--epn     # = --copy free + copy_control_type 01 + 0xDE с encryption_mode 0
+```
 
-If only these options are given — no subtitles, no audio, no table changes,
-with `--si keep` — the script takes a separate path: it patches the PMT
-sections inside the packet, recomputes the CRC and copies the whole rest of
-the file **byte for byte**, including the header before the sync byte and a
-short tail.
+Получается 0xC1 = 0x04 и 0xDE = 0xEE. Если объявить защиту только в 0xC1,
+скрипт предупредит.
+
+Значения попадают в PMT, а при генерации SI - ещё в EIT и SIT.
+Незатронутые биты сохраняются.
+
+### 9.4. Правка только флагов
+
+Если заданы только эти ключи - без субтитров, звука и смены таблиц, с
+`--si keep` - скрипт идёт отдельным проходом: правит секции PMT прямо в
+пакете с пересчётом CRC, а весь остальной файл копирует **байт в байт**,
+включая заголовок перед синхробайтом и неполный хвост.
 
 ```bash
 python3 arib_caption_mux.py sample.m2t -o free.m2t --si keep --copy free
 ```
 
 ```
-Copy-control edit, PMT PID 0x01F0: 578 sections, 578 bits changed
-Every other byte of the file was copied unchanged.
+Правка битов копирования, PMT PID 0x01F0: 578 секций, изменено битов 578
+Остальные байты файла скопированы без изменений.
 ```
 
-To compare two files byte by byte:
+Сравнить два файла побайтно:
 
 ```bash
 python3 arib_caption_mux.py a.m2t --diff b.m2t
 ```
 
-### 9.5. How the flag reaches the tape
+### 9.5. Как флаг попадает на ленту
 
-The D-VHS standard describes its own CGMS field in the tape data header,
-separate from the ARIB descriptor inside the stream. The values are the same:
-free, one generation, never. The details: the pair of bits is written to tape
-inverted, the value must be the same within a track, and when several
-programmes are recorded the strictest one wins.
+Стандарт D-VHS описывает собственное поле CGMS в служебном заголовке
+записи, отдельное от дескриптора ARIB внутри потока. Значения те же:
+свободно, одна копия, запрещено. Особенности: пара битов пишется на ленту
+в инвертированном виде, значение обязано быть одинаковым в пределах
+дорожки, а при записи нескольких программ выбирается самое строгое.
 
-So there are four layers, and they should not be confused:
+Так что уровней получается три: дескриптор в потоке (им управляет скрипт),
+CGMS в заголовке ленты (его пишет дека) и шифрование DTCP на шине.
 
-| Layer | Where it lives | Who writes it | Do we control it |
-|---|---|---|---|
-| Descriptors in the stream | PMT, EIT, SIT (0xC1, 0xDE, 0x88) | we do | yes |
-| CGMS in the tape header | the tape data header | the deck | no |
-| DTCP encryption on the bus | i.LINK | the sending device | indirectly, through the flags |
-| Encryption of the tape itself | the application-detail field | licensed duplication equipment | no (see 8.8) |
+### 9.6. Что эти флаги значат на самом деле
 
-### 9.6. What these flags really mean
+Важно не переоценивать их роль. Настоящая защита на i.LINK - это
+шифрование DTCP, и режим на шине задаёт передающее устройство. Биты в
+потоке - сигнализация.
 
-It is easy to overrate them. The real protection on i.LINK is DTCP
-encryption, and the mode on the bus is set by the sending device. The bits in
-the stream are signalling.
+Практическое следствие, подтверждённое на Victor HM-DH30000: дека разрешает
+**записать** поток с флагом «одна копия», но при **воспроизведении**
+сама становится источником DTCP, читает флаг из записанного потока и
+включает шифрование на выходе.
 
-The practical consequence, confirmed on a Victor HM-DH30000: the deck happily
-**records** a stream flagged copy-one-generation, but on **playback** it
-becomes a DTCP source itself, reads the flag out of the recorded stream and
-turns on encryption at the output.
+Поэтому:
 
-Hence:
+- **`--copy free`** - если хотите потом снимать материал с ленты обратно
+  на компьютер;
+- **`--copy once`** - если воспроизводите поведение настоящей эфирной
+  записи.
 
-- **`--copy free`** if you want to pull the material back off the tape into a
-  computer later;
-- **`--copy once`** if you are reproducing the behaviour of a real off-air
-  recording.
-
-On an off-air recording these flags reflect the broadcaster's terms.
+Для записи, снятой из эфира, эти флаги отражают условия вещателя.
 
 ---
 
-## 10. Timing
+## 10. Тайминг
 
-### 10.1. The zero point
+### 10.1. Точка отсчёта
 
-Zero in a subtitle file corresponds to the **earliest audio or video PTS** —
-the same convention ffmpeg, mpv and VLC use. A global shift is set with
+Ноль в файле субтитров соответствует **самому раннему PTS аудио или
+видео** - так же считают ffmpeg, mpv и VLC. Общий сдвиг задаётся через
 `--offset`.
 
-### 10.2. Lead time
+### 10.2. Опережение
 
-A caption PES goes out ahead of its own PTS so the receiver has time to
-prepare the screen. The default is 0.8 s, as in the off-air capture. Adjust
-it with `--lead`.
+PES с субтитрами выходит в потоке раньше своего PTS, чтобы приёмник успел
+подготовить экран. По умолчанию 0,8 с - как в эфирном образце.
+Настраивается через `--lead`.
 
-The caption_management_data packet repeats every 0.5 s (`--mgmt-interval`)
-and the SIT every second (`--sit-interval`; ARIB allows no more than 3).
+Служебный пакет caption_management_data повторяется каждые 0,5 с
+(`--mgmt-interval`), SIT - каждую секунду (`--sit-interval`, по ARIB
+не больше 3).
 
-### 10.3. Discontinuities
+### 10.3. Разрывы
 
-If the PCR jumps in the source file (a splice), the script inserts a DIT
-there and repeats the PAT, PMT and SIT. Caption timing then follows a
-continuous playback scale rather than the raw PCR values.
-
----
-
-## 11. Bit rate and D-VHS modes
-
-When it finishes the script prints the bit rate per PID and a verdict:
-
-```
-Duration 57.8 s, average output bit rate 14.25 Mbit/s
-   PID 0x0100:   11.335 Mbit/s
-   PID 0x0140:    2.479 Mbit/s
-D-VHS: fits recording mode HS
-```
-
-The modes run the tape at 1/k of the STD speed (Table 17 of the standard).
-Mind the difference between the two sets of numbers: the familiar 28.2 / 14.1 /
-4.7 Mbit/s are gross channel rates that include the error-correction codes, and
-a stream may only occupy 87.9 % of that. The decks confirm it -- an HM-DH30000
-writes exactly 12.3956 Mbit/s in STD and 4.1316 in LS3. Aim at the gross figure
-and the deck refuses the recording; an HM-DHS1 reports ERROR 108.
-
-| Mode | Payload ceiling | Mode | Payload ceiling |
-|---|---|---|---|
-| HS | 24.79 Mbit/s | LS3 | 4.13 Mbit/s |
-| STD | 12.40 Mbit/s | LS5 | 2.48 Mbit/s |
-| LS2 | 6.20 Mbit/s | LS7 | 1.77 Mbit/s |
-
-**What counts is the peak, not the average.** This is the usual trap with the
-slow modes: a stream averaging 3.7 Mbit/s looks comfortably inside LS3 and
-still plays with artefacts, because it peaks at 6.1. For comparison, an
-HM-DH30000 re-encoding into LS3 itself holds a constant 4.1 Mbit/s with 7 %
-null padding and never approaches the ceiling.
-
-The safest recipe for a slow mode is a constant-rate source. Encode the video
-at a constant rate into a constant-rate container -- the way both decks do --
-and this tool will put the audio and the tables into the padding rather than on
-top of it:
-
-```bash
-python3 arib_caption_mux.py video.m2t subs.srt -o out.m2t \
-    --si deck --audio-mp2 dub.wav
-python3 tsinfo.py out.m2t --max-mb 64      # confirm the peak before recording
-```
-
-Producing that video is a job for your encoder of choice; what matters is that
-its transport stream is already constant-rate and padded with null packets.
-
-### 11.1. The peak matters more than the average
-
-A tape records at a fixed rate, and the deck cannot smooth out a spike that
-lasts tens of milliseconds: its buffer overflows and playback stalls at that
-point. So the script measures the rate between adjacent PCRs and warns:
-
-```
-Peak instantaneous rate (between adjacent PCRs): 32.6 Mbit/s at 7.5 s
-WARNING: a peak of 32.6 Mbit/s is above the HS limit -- the deck may stall
-```
-
-The spike usually comes from the video itself: re-encode it with a lower
-`-maxrate`. The script spreads its own packets (audio, captions, tables)
-across the stream and never gathers them into bursts.
-
-If the target is an HM-DH30000 this rarely matters: that deck records only in
-HS and re-encodes the stream itself when asked for STD or LS3, and the
-captions come through the re-encode intact. On decks that record STD directly
-the limit is real.
-
-If the stream does not fit STD, `--drop-data` helps: it discards the DSM-CC
-data streams (BML carousels), which take a noticeable share of an off-air
-recording and have nothing to do with watching it.
+Если в исходном файле PCR прыгает (склейка), скрипт вставляет в этом
+месте DIT и повторяет PAT, PMT и SIT. Время субтитров при этом считается
+по непрерывной шкале воспроизведения, а не по значениям PCR.
 
 ---
 
-## 11.2. What the video itself has to satisfy
+## 11. Битрейт и режимы D-VHS
 
-The deck encodes nothing: it records the transport stream it is handed. So the
-video has to meet annex A.2.7 of the standard before it ever reaches this tool:
+В конце работы скрипт печатает битрейт по каждому PID и вердикт:
 
-* MP@ML, or MP@HL / MP@H14L for high definition;
-* frame rate 24/1.001, 24, 25, 30/1.001 or 30 Hz (50 and 60/1.001 for HD);
-* aspect ratio 4:3 or 16:9;
-* a luminance resolution from the tables -- 1920x1080, 1440x1080, 1280x720 or
-  720x480 for HD, and 720/704/640/544/480/352 x 480 (352x240) for SD;
-* a GOP structure with the sequence header immediately followed by an
-  I-picture and repeated at least every 36 display fields on 525/60 systems
-  (30 fields on 625/50), that is every 18 or 15 frames.
+```
+Длительность 57.8 с, средний битрейт выхода 14.25 Мбит/с
+   PID 0x0100:   11.335 Мбит/с
+   PID 0x0140:    2.479 Мбит/с
+D-VHS: помещается в режим HS
+```
 
-Both reference streams -- an off-air BS capture and a D-Theater demo tape --
-use MP@HL, 4:2:0, interlaced, with a sequence header on every GOP: 17.3 frames
-per GOP on air and 12.2 on the tape. Film is stored as progressive frames
-inside an interlaced sequence (progressive_frame = 1), not by weaving pairs of
-frames together.
+Пределы: **HS - 28,2 Мбит/с**, **STD - 14,1 Мбит/с**. Считается пиковый
+битрейт, а не средний.
 
-What the decks produce themselves, for reference:
+### 11.1. Пиковая скорость важнее средней
 
-| Mode | Raster | Rate | Level |
-|---|---|---|---|
-| STD | 720x480 | 12.40 Mbit/s constant | MP@ML |
-| LS3 | 544x480 | 4.13 Mbit/s constant | MP@ML |
+Лента пишется с фиксированной скоростью, и всплеск на десятки миллисекунд
+дека сгладить не может: у неё переполняется буфер, и воспроизведение
+запинается в этом месте. Поэтому скрипт измеряет скорость между соседними
+PCR и предупреждает:
 
-In both cases the peak equals the average, PCR are stamped every 16-17 ms, and
-the stream is padded with null packets.
+```
+Пиковая мгновенная скорость (между соседними PCR): 32.6 Мбит/с на 7.5 с
+ПРЕДУПРЕЖДЕНИЕ: пик 32.6 Мбит/с выше предела HS - дека может запнуться
+```
 
+Всплеск чаще всего даёт само видео: перекодируйте его с `-maxrate`
+пониже. Сам скрипт свои пакеты (звук, субтитры, таблицы) распределяет
+по потоку и в пачки не собирает.
 
-## 12. Ready-made recipes
+Если не влезает в STD, помогает `--drop-data`: выбрасываются потоки
+данных DSM-CC (карусели BML), которые в эфирной записи занимают заметную
+долю, а к просмотру отношения не имеют.
 
-### 12.1. Your own file for a Japanese deck, as close to broadcast as possible
+---
+
+## 12. Готовые рецепты
+
+### 12.1. Свой файл под японскую деку, максимально похоже на эфир
 
 ```bash
 python3 arib_caption_mux.py my.m2t episode.ass -o out.m2t \
-    --ass-dialogue-only --cyrillic half --drcs-font auto \
-    --audio jp.wav --audio-bitrate 256 \
-    --si broadcast --arib-pids \
-    --out-service-id 171 --ts-id 0x4012 --network-id 4 \
-    --service-name "BS Test" --event-name "Episode 1" --genre anime \
-    --caption-lang jpn --jst "2026-08-02 07:00:00" \
+    --ass-dialogue-only \
+    --cyrillic half \
+    --drcs-font auto \
+    --audio jp.wav \
+    --audio-bitrate 256 \
+    --si broadcast \
+    --arib-pids \
+    --out-service-id 171 \
+    --ts-id 0x4012 \
+    --network-id 4 \
+    --service-name "ＢＳテスト" \
+    --event-name "Yowayowa Sensei e01" \
+    --event-text "The series follows Akihito Abikura, a second-year high school student. His new homeroom teacher is Hiyori Hiwamura, an English teacher who recently graduated from university." \
+    --genre anime \
+    --caption-lang rus \
+    --jst "2026-08-02 07:00:00" \
     --copy free
 ```
 
-### 12.2. Compatibility with decks from different makers
+### 12.2. Совместимость с деками разных производителей
 
 ```bash
 python3 arib_caption_mux.py my.m2t subs.srt -o out.m2t \
     --audio jp.wav --audio-mp2 jp.wav --audio-lang jpn,jpn
 ```
 
-### 12.3. Two subtitle tracks and two audio tracks
+### 12.3. Две дорожки субтитров и две звуковые
 
 ```bash
-python3 arib_caption_mux.py my.m2t en.ass jp.srt -o out.m2t \
-    --caption-lang eng,jpn --cyrillic half \
-    --audio jp.wav --audio en.wav \
-    --audio-lang jpn,eng --audio-name "Japanese" --audio-name "English"
+python3 arib_caption_mux.py my.m2t ru.ass jp.srt -o out.m2t \
+    --caption-lang rus,jpn --cyrillic half \
+    --audio jp.wav --audio ru.wav \
+    --audio-lang jpn,rus --audio-name 日本語 --audio-name Русский
 ```
 
-### 12.4. An off-air recording: only replace the captions
+### 12.4. Эфирная запись: только заменить субтитры
 
 ```bash
-python3 arib_caption_mux.py sample.m2t en.srt -o out.m2t --caption-lang jpn
+python3 arib_caption_mux.py sample.m2t ru.srt -o out.m2t --caption-lang rus
 ```
 
-### 12.5. Remux only, no new captions
+### 12.5. Только перемукс, без новых субтитров
 
 ```bash
 python3 arib_caption_mux.py sample.m2t -o out.m2t
 ```
 
-### 12.6. Only change a copy-control flag
+### 12.6. Только поменять флаг копирования
 
 ```bash
 python3 arib_caption_mux.py sample.m2t -o free.m2t --si keep --copy free
 ```
 
-### 12.7. A D-Theater style tape
-
-```bash
-python3 arib_caption_mux.py my.m2t -o tape.m2t --dtheater \
-    --audio-mp2 stereo.wav --audio-ac3 surround.wav \
-    --dtheater-rate 25 --dtcp-cci never
-```
-
 ---
 
-## 13. Checking the result
+## 13. Проверка результата
 
-### 13.1. With libaribcaption
+### 13.1. Через libaribcaption
 
-`capcheck.cpp` ships alongside: it decodes the captions out of a finished
-file with the very library players use and, if you want, draws every cue into
-a PNG.
+В комплекте идёт `capcheck.cpp` - он декодирует субтитры из готового файла
+той самой библиотекой, которая используется в плеерах, и при желании
+рисует каждую фразу в PNG.
 
 ```bash
 git clone https://github.com/xqq/libaribcaption && cd libaribcaption
@@ -1273,17 +993,16 @@ L=$PWD; g++ -O2 -std=c++17 -I$L/include -I$L/build/include -I$L/src \
   -I$L/test/png_writer/include capcheck.cpp $L/test/png_writer/png_writer.cpp \
   $L/build/libaribcaption.a -lfreetype -lfontconfig -lpng -o capcheck
 
-./capcheck out.m2t 0x130          # text, timing, coordinates, colours
-./capcheck out.m2t 0x130 pngdir   # plus pictures
-./capcheck out.m2t 0x130 lang:2   # the second caption language
+./capcheck out.m2t 0x130          # текст, тайминг, координаты, цвета
+./capcheck out.m2t 0x130 pngdir   # плюс картинки
 ```
 
-### 13.2. With tsinfo.py
+### 13.2. Через tsinfo.py
 
-`tsinfo.py` takes a finished stream apart: tables, descriptors, captions by
-language, audio formats checked against IEC 60774-5, and a separate section
-on fitness for D-VHS — the peak instantaneous rate with the headroom to the
-HS and STD limits, long packet bursts, the PCR interval and the signs of a
+`tsinfo.py` разбирает готовый поток целиком: таблицы, дескрипторы, субтитры
+по языкам, форматы звука с проверкой по IEC 60774-5 и отдельный раздел
+«пригодность для записи на D-VHS» — пиковая мгновенная скорость с запасом
+до пределов HS и STD, длинные пачки пакетов, интервал PCR, признаки
 partial TS.
 
 ```bash
@@ -1291,373 +1010,166 @@ python3 tsinfo.py out.m2t --max-mb 64
 python3 tsinfo.py out.m2t --json > report.json
 ```
 
-### 13.3. With standard tools
+### 13.3. Через стандартные инструменты
 
 ```bash
-ffprobe -show_programs out.m2t                  # programmes, ES, codecs
-ffmpeg -v error -i out.m2t -map 0:a -f null -   # audio check
-mediainfo out.m2t                               # how players see the file
+ffprobe -show_programs out.m2t        # программы, ES, кодеки
+ffmpeg -v error -i out.m2t -map 0:a -f null -   # проверка звука
+mediainfo out.m2t                     # как файл видят плееры
 ```
 
-### 13.4. On the deck itself
+### 13.4. На самой деке
 
-The easiest way is to compare step by step, changing one thing at a time:
+Проще всего сравнивать по шагам, меняя по одной вещи за раз:
 
-1. the original off-air file as it is;
-2. `arib_caption_mux.py sample.m2t -o t2.m2t` — a remux with no new captions;
-3. `arib_caption_mux.py sample.m2t example_ja.srt -o t3.m2t` — your own
-   Japanese captions;
-4. your own file in full.
+1. исходный эфирный файл как есть;
+2. `arib_caption_mux.py sample.m2t -o t2.m2t` - перемукс без новых субтитров;
+3. `arib_caption_mux.py sample.m2t example_ja.srt -o t3.m2t` - свои японские;
+4. свой файл целиком.
 
-Wherever the picture breaks is the cause.
+Где картинка ломается, там и причина.
 
 ---
 
-### 13.5. A test kit for the deck
+## 14. Если что-то не работает
 
-`dvhs_test_caption1.ass` and `dvhs_test_caption2.srt` exercise, one by one,
-everything this tool can put into a caption stream. Each test is labelled in
-small type at the top of the screen, so you always know what you are looking
-at. `reference_caption1.png` and `reference_caption2.png` show how every screen
-should look, rendered by libaribcaption -- compare the deck against them.
-
-```bash
-python3 arib_caption_mux.py video.m2t dvhs_test_caption1.ass dvhs_test_caption2.srt \
-    -o test.m2t --caption-lang jpn,jpn
-# the same with glyphs outside the ARIB sets drawn as bitmaps:
-python3 arib_caption_mux.py video.m2t dvhs_test_caption1.ass dvhs_test_caption2.srt \
-    -o test_drcs.m2t --caption-lang jpn,jpn --drcs-font auto
-```
-
-Any video of about two and a half minutes will do. The two files are two
-languages of one caption ES, so the caption button switches between them;
-caption 2 carries a marker every four seconds, so you can tell at any moment
-which track is on screen.
-
-**Caption 1 (ASS): layout, sizes, text.**
-
-| Test | What it checks | What you should see |
-|---|---|---|
-| T01-T03 | one, two, three rows | stacked from the bottom, centred |
-| T04 | eight rows | the whole area filled, nothing cut off |
-| T05 | 15 full-width glyphs | one row, no wrap |
-| T06 | 31 half-width glyphs | one row, no wrap |
-| T07 | wrapping at spaces | three balanced rows, no word split |
-| T08 | Japanese kinsoku | no `、` or `。` at the start of a row |
-| T09 | the 3x3 alignment grid | nine labels at the corners, edges and centre |
-| T10 | absolute positions | four labels in the corners of the area |
-| T11 | normal and small size | a small row next to a normal one |
-| T12 | top and bottom at once | two speakers on one screen |
-| T13 | colours in ASS | six colours; blue shows as cyan and black as white |
-| T14-T15 | kana, kanji, full- and half-width Latin | all glyphs present |
-| T16-T17 | Cyrillic and Greek | 15 letters per row, no gaps |
-| T18 | ARIB extra symbols | every symbol drawn, none as the geta mark |
-| T19 | glyphs outside the sets | bitmaps with `--drcs-font`, substitutes and geta marks without |
-| T20 | eight cues half a second apart | every one of them, none skipped |
-| T21 | cues back to back | each replaces the previous without a flash |
-| T22 | a three-second gap | a clean empty screen, then the next cue |
-| T23 | a twelve-second cue | stable, no flicker or redraw |
-
-**Caption 2 (SRT): colours and switching.** All eight ARIB colours one after
-another, including black and blue, which caption 1 cannot show; then the top
-and bottom of the screen, a row mixing four colours, and markers until the end.
-Black and blue are nearly invisible on the dark box -- that is expected, and it
-is the reason the ASS reader remaps them.
-
-**What the kit does not cover.** ARIB STD-B24 can do more than this tool
-emits, so those features cannot be tested with it: flashing (FLC), highlight
-and underline (HLC), inverted polarity (POL), roll-up and scrolling (SCR),
-the built-in sounds (PRA), vertical writing, outlined characters (ORN),
-concealment (CDC), character repetition (RPC), and the colour palettes beyond
-the eight base colours of palette 0, including half-tone and transparent
-colours. A deck that renders everything in the kit correctly handles the
-whole of what this tool can produce, not the whole of the standard.
-
-`make_caption_test.py` regenerates both files; edit its test plan to add or
-change tests.
-
-## 14. Troubleshooting
-
-| What you see | Most likely |
+| Что видно | Скорее всего |
 |---|---|
-| Captions drifted, the tail of a row is at the top of the screen | `--positioning acps` was used, `aps` (the default) is needed |
-| Captions show on the SD output but not on HD | a limitation of the deck; check with the ladder in 13.4 |
-| No captions at all | only the HM-DH30000 renders them; the others record but do not display them |
-| A Hitachi deck does not accept the stream | `--si deck --deck-profile hitachi`, see 8.1.1 |
-| A geta mark instead of a glyph | the glyph is not in JIS X 0208 -> `--drcs-font auto` |
-| Rows are too short | `--cyrillic half`, a wider `--area` |
-| Control codes instead of text | `--caption-lang eng` without `--encoding utf8`, see 4.4 |
-| A blank screen in `utf8` mode | the deck does not support UCS, go back to `jis` |
-| Small ASS text seems to have vanished during a check | that is `--ass-small ssz`, see 6.4 |
-| The audio drifted by 20-40 ms | a ready-made `.aac` from ffmpeg -> `--audio-delay-samples 1024` |
-| A Japanese deck is silent | the audio is not AAC -> `--audio file.wav` |
-| An occasional loud click on an AAC track | the audio is handed out too early, see 7.11; try `--audio-lead 0.10` |
-| Another maker's deck is silent | an `--audio-mp2` track is needed |
-| PCM sounds like noise in a player | the player expects ffmpeg's order, see 7.8 |
-| Does not fit STD | `--drop-data`, a lower audio bit rate |
-| Artefacts in a slow mode (LS3 and below) | the peak is above the mode ceiling, see 11 |
-| Artefacts in STD | same cause: the deck's own STD is a constant 12.4 Mbit/s, measure your peak |
-| "the file does not look like a ... stream" | the wrong format was passed (mp3 instead of mp2, say) |
-| "the event description does not fit" | a description longer than about 4 KB, the tail was dropped |
-| The deck stalls at the same places | a rate spike, see 11.1 |
-| You want to encrypt the tape itself | impossible, see 8.8; only output protection is available |
-| Only the first subtitle track shows | `--caption-multi es` was used, `lang` is needed |
-| Playback from tape goes out encrypted | the flag is not `free`, see 9.6 |
-| `--copy free` behaves like `copy never` | an old version wrote `copy_control_type` = 00, see 9.2 |
-| ASS signs overlap the dialogue | `--ass-signs top` or `--ass-dialogue-only` |
+| Субтитры уехали, хвост строки наверху экрана | было `--positioning acps`, нужен `aps` (по умолчанию) |
+| Субтитры видны на выходе SD, но не на HD | ограничение деки; проверьте по схеме 13.3 |
+| Вместо знака 〓 | знака нет в JIS X 0208 → `--drcs-font auto` |
+| Строки слишком короткие | `--cyrillic half`, шире `--area` |
+| Вместо текста мусор из управляющих кодов | `--caption-lang eng` без `--encoding utf8`, см. 4.4 |
+| В режиме `utf8` дека показывает пустой экран | она не поддерживает UCS, вернитесь к `jis` |
+| Мелкий текст ASS «пропал» при проверке | это `--ass-small ssz`, см. 6.4 |
+| Звук уехал на 20–40 мс | готовый `.aac` от ffmpeg → `--audio-delay-samples 1024` |
+| Японская дека молчит на звуке | звук не AAC → `--audio file.wav` |
+| Чужая дека молчит на звуке | нужна дорожка `--audio-mp2` |
+| Не влезает в STD | `--drop-data`, ниже битрейт звука |
+| «файл не похож на поток…» | подан не тот формат (например, mp3 вместо mp2) |
+| «описание передачи не помещается» | описание длиннее ~4 КБ, хвост отброшен |
+| Дека запинается в одних и тех же местах | всплеск скорости, см. 11.1 |
+| Видна только первая дорожка субтитров | стоял `--caption-multi es`, нужен `lang` |
+| При воспроизведении с ленты идёт шифрование | флаг не `free`, см. 9.6 |
+| `--copy free` ведёт себя как `copy never` | старая версия писала `copy_control_type` = 00, см. 9.2 |
+| Надписи ASS лезут поверх реплик | `--ass-signs top` или `--ass-dialogue-only` |
 
-The script writes its warnings to the error stream, so they stay visible even
-when the output is redirected to a file.
+Предупреждения скрипт пишет в поток ошибок, поэтому их видно, даже если
+вывод перенаправлен в файл.
 
 ---
 
-## 15. Every option
+## 15. Все ключи
 
-The full list is always available with:
+Полный список всегда доступен так:
 
 ```bash
 python3 arib_caption_mux.py --help
 ```
 
-### Basics
+### Основное
 
-| Option | Default | Meaning |
+| Ключ | Значение по умолчанию | Смысл |
 |---|---|---|
-| `input` | — | input MPEG-TS |
-| `subs ...` | — | one or more SRT/ASS files |
-| `-o` | — | output file |
-| `--list` | — | show the contents and exit |
-| `--service-id` | the first with video | which service to take |
-| `--diff FILE` | — | byte comparison |
+| `input` | - | входной MPEG-TS |
+| `subs ...` | - | один или несколько файлов SRT/ASS |
+| `-o` | - | выходной файл |
+| `--list` | - | показать содержимое и выйти |
+| `--service-id` | первый с видео | какой сервис брать |
+| `--diff ФАЙЛ` | - | побайтовое сравнение |
 
-### Subtitles
+### Субтитры
 
-| Option | Default | Meaning |
+| Ключ | По умолчанию | Смысл |
 |---|---|---|
-| `--caption-lang` | `jpn` | track languages (eng/tgl/por/spa change the encoding scheme, see 4.4) |
-| `--encoding` | `jis` | ARIB sets or UCS/UTF-8 |
-| `--caption-pid` | 0x130, 0x131... | track PIDs |
-| `--caption-multi` | `lang` | languages in one ES or separate ES |
-| `--offset` | 0 | offset, seconds |
-| `--existing` | `replace` | whether to replace broadcast captions |
-| `--positioning` | `aps` | how rows are positioned |
-| `--cyrillic` | `full` | Cyrillic width |
-| `--drcs-font` | — | font for glyphs outside the sets |
-| `--area` | 620x480+170+30 | caption area inside the 960x540 plane |
-| `--lead` | 0.8 | PES lead time, seconds |
-| `--mgmt-interval` | 0.5 | management packet period, seconds |
+| `--caption-lang` | `jpn` | языки дорожек (eng/tgl/por/spa меняют схему кодирования, см. 4.4) |
+| `--encoding` | `jis` | наборы ARIB или UCS/UTF-8 |
+| `--caption-pid` | 0x130, 0x131… | PID дорожек |
+| `--caption-multi` | `lang` | языки в одном ES или отдельные ES |
+| `--offset` | 0 | сдвиг, с |
+| `--existing` | `replace` | заменять эфирные субтитры или нет |
+| `--positioning` | `aps` | способ позиционирования строк |
+| `--cyrillic` | `full` | ширина кириллицы |
+| `--drcs-font` | - | шрифт для знаков вне наборов |
+| `--area` | 620x480+170+30 | область субтитров в плоскости 960×540 |
+| `--lead` | 0.8 | опережение PES, с |
+| `--mgmt-interval` | 0.5 | период служебного пакета, с |
 
 ### ASS
 
-| Option | Default | Meaning |
+| Ключ | По умолчанию | Смысл |
 |---|---|---|
-| `--ass-dialogue-only` | off | dialogue only |
-| `--ass-list-styles` | — | print the verdict per style |
-| `--ass-signs` | `place` | what to do with signs |
-| `--ass-only-styles` / `--ass-skip-styles` | — | manual style selection |
-| `--ass-small` | `ssz` | size of small text |
-| `--ass-min-duration` | 0.3 | short-screen threshold, seconds |
+| `--ass-dialogue-only` | выкл. | только реплики |
+| `--ass-list-styles` | - | показать решение по стилям |
+| `--ass-signs` | `place` | что делать с надписями |
+| `--ass-only-styles` / `--ass-skip-styles` | - | ручной отбор стилей |
+| `--ass-small` | `ssz` | размер мелкого текста |
+| `--ass-min-duration` | 0.3 | порог короткого экрана, с |
 
-### Audio
+### Звук
 
-| Option | Default | Meaning |
+| Ключ | По умолчанию | Смысл |
 |---|---|---|
-| `--audio` / `--audio-wav` / `--audio-aac` / `--audio-mp2` / `--audio-ac3` / `--audio-dts` / `--audio-pcm` | — | tracks |
-| `--pcm-bit-order` | `dvhs` | bit order in the SMPTE 302M field |
-| `--keep-audio` | off | keep the source audio |
-| `--audio-lang` | `jpn` | track languages |
-| `--audio-name` | — | track names |
-| `--audio-channels` | as in the WAV | 1, 2 or 6 |
-| `--audio-bitrate` | 256 / 384 / 144 | kbit/s |
-| `--audio-offset` | 0 | offset, seconds |
-| `--audio-delay-samples` | measured | encoder delay |
-| `--aac-encoder` | `auto` | fdkaac or ffmpeg |
-| `--mp2-encoder` | `auto` | libtwolame or ffmpeg |
-| `--audio-lang-pmt` | off | language in the PMT for players |
+| `--audio` / `--audio-wav` / `--audio-aac` / `--audio-mp2` | - | дорожки |
+| `--keep-audio` | выкл. | сохранить исходный звук |
+| `--audio-lang` | `jpn` | языки дорожек |
+| `--audio-name` | - | названия дорожек |
+| `--audio-channels` | как в WAV | 1, 2 или 6 |
+| `--audio-bitrate` | 256 / 384 / 144 | кбит/с |
+| `--audio-offset` | 0 | сдвиг, с |
+| `--audio-delay-samples` | измеренная | задержка кодировщика |
+| `--aac-encoder` | `auto` | fdkaac или ffmpeg |
+| `--mp2-encoder` | `auto` | libtwolame или ffmpeg |
+| `--audio-lang-pmt` | выкл. | язык в PMT для плееров |
 
-### Tables and flags
+### Таблицы и флаги
 
-| Option | Default | Meaning |
+| Ключ | По умолчанию | Смысл |
 |---|---|---|
-| `--dtheater` | off | D-Theater tape layout (see 8.8) |
-| `--dtheater-rate` | the peak | tape rate, Mbit/s |
-| `--dtcp-cci` | `never` | copy control on the tape |
-| `--dtcp-aps` / `--dtcp-epn-asserted` / `--dtcp-no-image-constraint` | — | the other DTCP fields |
-| `--psi-interval` | 0.047 | PAT/PMT period in tape mode, seconds |
-| `--smoothing-buffer` | 950272 | buffer size in the smoothing_buffer_descriptor |
-| `--ffmpeg` | `ffmpeg` | path to ffmpeg |
-| `--si` | `partial` | which tables to emit (`partial`, `broadcast`, `deck`, `both`, `keep`) |
-| `--deck-profile` | `victor-dh30000` | whose layout `--si deck` reproduces: `victor-dh30000`, `victor-dhx1`, `hitachi` |
-| `--si-regenerate` | off | rebuild the SI of a Japanese stream |
-| `--arib-pids` | off | broadcast PID numbering |
-| `--sit-interval` | 1.0 | SIT period, seconds |
-| `--network-id` / `--media-type` | from the NIT | network |
-| `--service-name` / `--provider-name` | — | names for the SDT |
-| `--event-name` / `--event-text` / `--genre` / `--event-id` / `--event-duration` | — | the event for the EIT |
-| `--jst` | from the file | recording time |
-| `--ts-id` / `--out-service-id` / `--broadcaster-id` / `--network-name` | from the input | identifiers |
-| `--copy` / `--content-availability` | from the input | copy-control flags |
-| `--copy-control-type` | `auto` | whether to encrypt the output |
-| `--epn` | off | copy free with protected output |
-| `--aps` / `--user-defined` | from the input | analogue protection, the whole nibble |
-| `--keep-ca` | off | do not strip the CA_descriptor |
-| `--drop-data` | off | drop DSM-CC |
-| `--peak-rate` | measured | peak_rate in the SIT |
-| `--no-superimpose` | off | no superimpose stream |
-| `--simple-pes` | off | a simplified PES header |
-| `--no-partial-ts` | off | a synonym for `--si keep` |
-
+| `--si` | `partial` | набор таблиц |
+| `--si-regenerate` | выкл. | перестроить SI японского потока |
+| `--arib-pids` | выкл. | эфирная нумерация PID |
+| `--sit-interval` | 1.0 | период SIT, с |
+| `--network-id` / `--media-type` | из NIT | сеть |
+| `--service-name` / `--provider-name` | - | названия для SDT |
+| `--event-name` / `--event-text` / `--genre` / `--event-id` / `--event-duration` | - | передача для EIT |
+| `--jst` | из файла | время записи |
+| `--ts-id` / `--out-service-id` / `--broadcaster-id` / `--network-name` | из входа | идентификаторы |
+| `--copy` / `--content-availability` | из входа | флаги копирования |
+| `--copy-control-type` | `auto` | шифровать выход или нет |
+| `--epn` | выкл. | копирование свободно, выход под защитой |
+| `--aps` / `--user-defined` | из входа | защита аналогового выхода, весь полубайт |
+| `--keep-ca` | выкл. | не удалять CA_descriptor |
+| `--drop-data` | выкл. | выбросить DSM-CC |
+| `--peak-rate` | измеряется | peak_rate в SIT |
+| `--no-superimpose` | выкл. | без потока суперимпоза |
+| `--simple-pes` | выкл. | упрощённый заголовок PES |
+| `--no-partial-ts` | выкл. | синоним `--si keep` |
 
 ---
 
-## Glossary
+## Приложение. Что проверялось
 
-Abbreviations used above, in the order a newcomer usually meets them.
-
-### Standards and organisations
-
-| Term | Meaning |
+| Проверка | Как |
 |---|---|
-| **ARIB** | Association of Radio Industries and Businesses, the Japanese body whose standards define digital broadcasting there |
-| **ARIB STD-B24** | the caption standard: character sets, control codes, screen layout |
-| **ARIB STD-B21** | the receiver standard; it defines the partial TS a tuner sends over i.LINK |
-| **ARIB STD-B10** | the service-information standard: tables and descriptors |
-| **IEC 60774-5** | the D-VHS standard (published in Europe as BS EN 60774-5) |
-| **ISDB** | Integrated Services Digital Broadcasting, the Japanese broadcasting system |
-| **DVB** | Digital Video Broadcasting, the European system; similar tables, different details |
-| **SMPTE 302M** | the standard for carrying linear PCM audio in an MPEG-2 stream |
-| **ABNT** | the Brazilian standards body; its Latin character sets appear in the ARIB language rules |
+| Субтитры декодируются | libaribcaption, весь набор из 7484 знаков |
+| Геометрия и перенос | рендеринг в PNG, сверка с эфирным образцом |
+| Позиционирование | Victor HM-DH30000, измерение по скриншотам |
+| Синхронность звука | щелчок в WAV, измерение положения в готовом TS |
+| Порядок каналов 5.1 | разные тоны по каналам, сверка до и после |
+| Задержки кодировщиков | измерение по щелчку через полный цикл |
+| Таблицы | разбор своим кодом, проверка CRC и периодов |
+| Флаги копирования | побайтовое сравнение с эталонным эфирный сэмплом |
+| Запись и воспроизведение | Victor HM-DH30000 |
 
-### The transport stream
+Сверено со стандартом IEC 60774-5 (BS EN 60774-5:2004): требования к
+звуку, поле CGMS в заголовке ленты, механизм шифрования D-Theater.
 
-| Term | Meaning |
-|---|---|
-| **TS** | Transport Stream, the 188-byte packet format everything here is made of |
-| **PID** | Packet Identifier, the 13-bit number that says which stream a packet belongs to |
-| **ES** | Elementary Stream, one continuous stream of video, audio or captions |
-| **PES** | Packetized Elementary Stream, an ES cut into packets with headers and timestamps |
-| **PSI / SI** | Program Specific Information / Service Information: the tables describing the stream |
-| **PCR** | Program Clock Reference, the clock samples that tell the receiver how fast to run |
-| **PTS / DTS** | Presentation / Decoding Time Stamp: when a frame should be shown or decoded |
-| **CC** | continuity_counter, a 4-bit counter per PID used to spot lost packets |
-| **CRC** | the checksum that protects a table section or an audio frame |
-| **partial TS** | a stripped-down stream carrying one programme, what a tuner hands a recorder |
+Не проверялось: поведение D-VHS других производителей.
 
-### The tables
+## Спасибо проектам:
 
-| Table | Meaning |
-|---|---|
-| **PAT** | Program Association Table: which programmes exist and where their PMT is |
-| **PMT** | Program Map Table: which streams make up one programme |
-| **SIT** | Selection Information Table: describes what was recorded, used in a partial TS |
-| **DIT** | Discontinuity Information Table: marks a splice |
-| **NIT** | Network Information Table: the network and its transponders |
-| **SDT** | Service Description Table: service and provider names |
-| **EIT** | Event Information Table: the programme guide |
-| **TOT / TDT** | Time Offset / Time and Date Table: the broadcast clock |
-| **BIT** | Broadcaster Information Table: the broadcaster and table repetition periods |
-| **CAT / ECM / EMM** | conditional-access tables and messages: the scrambling system |
-| **SDTT** | Software Download Trigger Table: receiver firmware updates |
-| **CDT** | Common Data Table: channel logos |
-| **BML** | Broadcast Markup Language, the data-broadcasting content carried in DSM-CC carousels |
-| **DSM-CC** | Digital Storage Media Command and Control, the carousel mechanism that carries BML |
-| **EPG** | Electronic Programme Guide, what the EIT feeds |
-
-### Captions
-
-| Term | Meaning |
-|---|---|
-| **DRCS** | Dynamically Redefinable Character Set: glyphs sent as bitmaps inside the stream |
-| **G0 / G1** | the invoked character sets: kanji and alphanumeric |
-| **LS0 / LS1** | Locking Shift, the codes that switch between those sets |
-| **ESC** | the escape code that designates a set, used here to reach DRCS |
-| **NSZ / MSZ / SSZ** | Normal / Middle / Small SiZe: a full cell, half width, or the small ruby size |
-| **APS / ACPS** | Active Position Set / Active Coordinate Position Set: cursor placement by cell or by dot |
-| **SWF / SDF / SDP** | Set Writing Format / Display Format / Display Position: the plane and the caption area |
-| **SSM / SHS / SVS** | character size, horizontal spacing, vertical spacing |
-| **CS** | Clear Screen |
-| **FLC / HLC / POL / SCR / PRA / ORN / CDC / RPC** | flashing, highlight, polarity, scrolling, built-in sound, ornament, concealment, repetition: caption controls this tool does not emit |
-| **TCS** | the field saying whether the text is in the ARIB sets or in UCS |
-| **UCS** | Universal Character Set, that is Unicode; the text then travels as UTF-8 |
-| **JIS X 0208** | the Japanese character set that also holds Cyrillic and Greek |
-| **ruby** | the small annotation text printed above a word; SSZ is meant for it |
-| **ASS / SSA** | Advanced SubStation Alpha, the subtitle format with styles and positioning |
-| **SRT** | SubRip, the plain subtitle format |
-
-### Audio and video
-
-| Term | Meaning |
-|---|---|
-| **AAC** | Advanced Audio Coding, what Japanese broadcasting uses |
-| **AAC-LC** | its Low Complexity profile, the only one D-VHS allows |
-| **ADTS** | Audio Data Transport Stream, the frame format AAC travels in |
-| **MP2** | MPEG-1 Audio Layer II |
-| **AC-3** | Dolby Digital |
-| **DTS** | DTS Coherent Acoustics |
-| **PCM / LPCM** | uncompressed audio; here per SMPTE 302M |
-| **LFE** | the Low Frequency Effects channel, the ".1" of 5.1 |
-| **GOP** | Group Of Pictures, the repeating unit of an MPEG-2 video stream |
-| **VBV** | Video Buffering Verifier, the decoder buffer model that limits bursts |
-| **MP@ML / MP@HL / MP@H14L** | Main Profile at Main, High or High-1440 Level: the MPEG-2 profile and level |
-| **MPEG-1 / MPEG-2** | the coding families; the video here is always MPEG-2, the MP2 audio is MPEG-1 |
-| **CBR / VBR** | constant or variable bit rate |
-
-### Recording and protection
-
-| Term | Meaning |
-|---|---|
-| **D-VHS** | the digital VHS format: the deck records the transport stream as it is |
-| **D-Theater** | pre-recorded D-VHS movie tapes, encrypted at the factory |
-| **HS / STD / LS2 / LS3 / LS5 / LS7** | the tape speeds, from fastest to slowest; LS*k* runs the tape at 1/*k* of the STD speed |
-| **i.LINK** | Sony's name for IEEE 1394 (FireWire), the digital link to the deck |
-| **DTCP** | Digital Transmission Content Protection, the encryption used on that link |
-| **DTLA** | the licensing body behind DTCP; its CA_System_ID 0x0FFF appears in the descriptor |
-| **CGMS** | Copy Generation Management System, the copy flag in the tape data header |
-| **EPN** | Encryption Plus Non-assertion: copy freely, but hand the stream out protected |
-| **APS** | Analogue Protection System, the anti-copy signal on the analogue output |
-| **CCI** | Copy Control Information, the two bits saying free / one generation / never |
-| **MTRM** | the registration identifier marking a stream as D-VHS compliant |
-| **BSSD** | the registration identifier marking an SMPTE 302M audio track |
-| **CTP** | Common Transport Packet, an alternative payload type in the tape header |
-
-### Miscellaneous
-
-| Term | Meaning |
-|---|---|
-| **BS** | Broadcasting Satellite, the Japanese satellite platform at 110°E |
-| **CS** (in *media_type*) | Communication Satellite, the other Japanese satellite platform |
-| **JST** | Japan Standard Time, UTC+9, the clock the TOT carries |
-| **MJD** | Modified Julian Date, how dates are encoded in the tables |
-| **ISO 639-2** | the three-letter language codes: jpn, eng, rus |
-| **UTF-8** | the Unicode encoding used when the captions travel in UCS mode |
-| **CC** (in *closed captions*) | the American caption system, carried inside the video rather than as a separate ES |
-
----
-
-## Appendix. What was verified, and how
-
-| Check | How |
-|---|---|
-| Captions decode | libaribcaption, the whole 7484-glyph set |
-| Geometry and wrapping | rendered to PNG and compared with the off-air capture |
-| Positioning | Victor HM-DH30000, measured from screenshots |
-| Audio sync | a click in the WAV, its position measured in the finished TS |
-| 5.1 channel order | a different tone per channel, compared before and after |
-| Encoder delays | measured with a click through the full cycle |
-| Tables | parsed with separate code, CRC and periods checked |
-| Copy-control flags | byte comparison against a reference `copyctl.py` |
-| Recording and playback | Victor HM-DH30000, HM-DHX1 |
-| The deck's own partial TS | compared against an HM-DH30000 LS3 re-encode |
-| Audio formats on hardware | Victor HM-DHX1 and HM-DH30000: AAC, MP2, AC-3 |
-
-Checked against IEC 60774-5 (BS EN 60774-5:2004): the audio requirements,
-the CGMS field in the tape header, the D-Theater encryption mechanism (the
-application-detail field) and the D-VHS MPEG format (registration MTRM,
-DTCP_descriptor, maximum_bitrate, smoothing_buffer).
-
-The structure of `--dtheater` mode was checked against a D-Theater demo tape:
-the set and order of descriptors match, the PAT/PMT rate is 21.2 against
-20.1 per second, and the stream is constant-rate with null padding.
-
-Not verified: the behaviour of decks from other makers, multichannel AAC on a
-real deck, and switching between caption 1 and caption 2 on a deck.
+- https://github.com/xqq/libaribcaption
+- https://github.com/nu774/fdkaac
+- https://github.com/ffmpeg/ffmpeg
+- https://github.com/njh/twolame
